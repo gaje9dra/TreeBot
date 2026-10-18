@@ -632,6 +632,15 @@ export class PostgresExecutionStore {
           VALUES($1,$2,'withdrawal',LOWER($3),-$4::numeric,137,$5,$6::jsonb)`,
           [row.account_id,"withdrawal:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId+":token",row.asset_address,
             proof.actualAmountBaseUnits,proof.transactionHash.toLowerCase(),evidence]);
+        const priorInventoryQ=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) FOR UPDATE",[row.account_id,row.asset_address]);
+        const priorInventory=BigInt(priorInventoryQ.rows[0]?.quantity??"0");
+        const basisRow=this.accountingQuoteToken?await c.query(
+          "SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) FOR UPDATE",
+          [row.account_id,row.asset_address,this.accountingQuoteToken],
+        ):null;
+        const basisComplete=!!basisRow?.rows[0]&&basisRow.rows[0].cost_basis_status==="complete"&&BigInt(String(basisRow.rows[0].quantity))===priorInventory&&priorInventory>=BigInt(proof.actualAmountBaseUnits);
+        const priorCostBasis=basisComplete?BigInt(String(basisRow?.rows[0]?.cost_basis)):0n;
+        let costBasisFailure:string|null=null;
         const inventoryDebit=await c.query(
           `UPDATE execution_position_inventory SET quantity_base_units=quantity_base_units-$3::numeric,updated_at=NOW()
            WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) AND quantity_base_units >= $3::numeric
@@ -654,6 +663,43 @@ export class PostgresExecutionStore {
              cost_basis_status=CASE WHEN execution_open_positions.cost_basis_status='complete' THEN 'reconciliation_required' ELSE 'pending' END,updated_at=NOW()`,
           [row.account_id,row.asset_address,inventoryQuantity.toString()],
         );
+        if(this.accountingQuoteToken&&basisRow?.rows[0]&&basisRow.rows[0].cost_basis_status==="complete"){
+          if(basisComplete&&inventoryDebit.rowCount===1){
+            const newQuantity=priorInventory-BigInt(proof.actualAmountBaseUnits);
+            const allocated=this.accountingQuoteToken===String(row.asset_address).toLowerCase()
+              ?BigInt(proof.actualAmountBaseUnits)
+              :(priorCostBasis*BigInt(proof.actualAmountBaseUnits))/priorInventory;
+            const newCost=this.accountingQuoteToken===String(row.asset_address).toLowerCase()
+              ?(priorCostBasis>=allocated?priorCostBasis-allocated:0n)
+              :priorCostBasis-allocated;
+            await c.query(
+              "UPDATE execution_open_positions SET quantity_base_units=$4::numeric,cost_basis_quote_base_units=$5::numeric,cost_basis_status='complete',updated_at=NOW() WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)",
+              [row.account_id,row.asset_address,this.accountingQuoteToken,newQuantity.toString(),newCost.toString()],
+            );
+            if(this.accountingQuoteToken===String(row.asset_address).toLowerCase()&&priorCostBasis<allocated){
+              costBasisFailure="Quote-token cost basis fell below the withdrawn amount.";
+            }
+          }else{
+            await c.query("UPDATE execution_open_positions SET cost_basis_status='reconciliation_required',updated_at=NOW() WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)",
+              [row.account_id,row.asset_address,this.accountingQuoteToken]);
+            costBasisFailure="Withdrawal settlement could not reconcile complete cost basis with the inventory quantity.";
+          }
+        }
+        if(costBasisFailure){
+          const incidentKey="withdrawal-cost-basis:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId;
+          const details=JSON.stringify({withdrawalId:proof.withdrawalId,transactionHash:proof.transactionHash,assetAddress:row.asset_address,cause:costBasisFailure});
+          await c.query(
+            `INSERT INTO execution_financial_incidents(incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,status,details)
+             VALUES($1,'settlement_conflict',$2,LOWER($3),$4::numeric,137,$5,$6,'open',$7::jsonb) ON CONFLICT(incident_key) DO NOTHING`,
+            [incidentKey,row.account_id,row.asset_address,proof.actualAmountBaseUnits,proof.transactionHash.toLowerCase(),proof.logIndex,details],
+          );
+          await c.query(
+            `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+             VALUES($1,$2,'operator_hold','active','Withdrawal cost basis requires reconciliation.',$3::jsonb) ON CONFLICT(restriction_key) DO NOTHING`,
+            [row.account_id,incidentKey,details],
+          );
+          await c.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+        }
         if(discrepancy!==0n||inventoryDebit.rowCount!==1){
           const incidentKey="withdrawal-ledger-mismatch:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId;
           const amount=(discrepancy<0n?-discrepancy:discrepancy).toString()==="0"?proof.actualAmountBaseUnits:(discrepancy<0n?-discrepancy:discrepancy).toString();
