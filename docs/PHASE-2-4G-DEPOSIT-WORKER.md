@@ -54,6 +54,21 @@ Run the worker as a dedicated, non-root service with access only to its database
 
 The process handles SIGINT/SIGTERM, records durable heartbeat state, bounds scan ranges, retries RPC transport failures, and stops advancing checkpoints when the providers disagree. It raises deduplicated alerts for provider/RPC failures, stalled scanning, confirmed-but-uncredited observations, open financial incidents, and webhook delivery failures.
 
+## Valuation worker
+
+The valuation worker is separate from deposit crediting and cannot move funds. It reads the canonical quote token and approved Chainlink feed mapping, requires two distinct HTTPS Polygon RPC providers to agree on the same finalized block, validates positive/non-stale Chainlink rounds, stores the exact reduced price ratio, and persists feed/round/block evidence. The snapshot API trusts only source identifiers listed in `TREEBOT_TRUSTED_VALUATION_SOURCES_JSON`.
+
+Required settings after feed review include:
+
+- `TREEBOT_VALUATIONS_ENABLED=true`, `TREEBOT_VALUATIONS_OPERATOR_APPROVED=true`, `TREEBOT_VALUATIONS_SECURITY_REVIEWED=true`, and `TREEBOT_VALUATIONS_NETWORK_VERIFIED=true`
+- `TREEBOT_ACCOUNTING_QUOTE_TOKEN` and its USD feed in `TREEBOT_QUOTE_TOKEN_FEED_ADDRESS`
+- `TREEBOT_PRICE_FEEDS_JSON` mapping each held token to its reviewed Chainlink USD feed
+- `TREEBOT_TOKEN_DECIMALS_JSON` mapping every held token to verified decimals, plus `TREEBOT_QUOTE_TOKEN_DECIMALS`
+- `TREEBOT_TRUSTED_VALUATION_SOURCES_JSON=["chainlink_polygon"]`
+- `TREEBOT_VALUATION_ALERT_WEBHOOK`, freshness limit, and 64+ confirmation policy
+
+Run `npm run worker:valuations` under the same non-root supervisor pattern. With `TREEBOT_VALUATIONS_ENABLED=false` (the default), it exits without opening a database or RPC connection. Do not enable it with guessed feed addresses or unreviewed token decimals.
+
 ## Health queries
 
 ```sql
@@ -77,7 +92,7 @@ The PostgreSQL ledger remains the cash-affecting source of truth. A separate tok
 
 The canonical quote token is required for trade preparation. Trades between two non-quote assets are blocked until a trusted conversion path exists. Selling a non-quote asset is allowed only when a complete quote-token cost basis covers its full inventory. Quote-token buys establish cost basis from the exact quote amount spent; sales to the quote token record realized P&L using integer base units. Realized P&L is a memorandum journal entry and is excluded from spendable balances; gas is recorded separately in native POL units.
 
-Cost basis remains explicitly `pending` when a non-quote deposit lacks a verified acquisition valuation. The portfolio snapshot returns unrealized P&L only when inventory matches the ledger, cost basis is complete, and a fresh valuation comes from a configured trusted source. **This repository does not yet include an activated, independently verified valuation-feed worker**, so unrealized P&L and total portfolio valuation must remain unavailable until that source is implemented, tested, and approved. Do not fill missing prices with guessed values.
+Cost basis remains explicitly `pending` when a non-quote deposit lacks a verified acquisition valuation. The portfolio snapshot returns unrealized P&L only when inventory matches the ledger, cost basis is complete, and a fresh valuation comes from a configured trusted source. The repository now includes a dual-provider Chainlink valuation verifier and supervised valuation worker, but it remains **disabled by default** and no production feed mapping has been independently verified here. Unrealized P&L and total portfolio valuation remain unavailable until the feed addresses, token decimals, freshness policy, and operator approvals are configured and the worker is tested against Polygon. Do not fill missing prices with guessed values.
 
 ## Incident handling
 
