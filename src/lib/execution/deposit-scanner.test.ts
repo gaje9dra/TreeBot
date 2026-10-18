@@ -100,6 +100,28 @@ describe("PolygonDepositScanner", () => {
   });
 
 
+  it("persists an unmapped sender as non-creditable evidence for operations alerts", async () => {
+    const f = fixture();
+    const scanner = new PolygonDepositScanner(f.chain, f.store, {
+      watcherKey: "unmapped-vault",
+      startBlock: 100n,
+      vaultAddress: vault,
+      supportedTokenAddresses: [token],
+      creditingEnabled: true,
+      tokenDecimalsByAddress: { [token.toLowerCase()]: 6 },
+      confirmations: 64,
+      maxBlockRange: 100,
+      accountForSender: async () => null,
+    });
+    await expect(scanner.scanOnce()).resolves.toMatchObject({ inserted: 1, credited: 0 });
+    const call = (f.store.commitScannedRange as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      observations: Array<{ accountId: string; proof?: unknown }>;
+    };
+    expect(call.observations).toHaveLength(1);
+    expect(call.observations[0]!.accountId).toBe("unmapped:" + sender.toLowerCase());
+    expect(call.observations[0]!.proof).toBeUndefined();
+  });
+
   it("rejects a candidate when the receipt log at the exact index disagrees", async () => {
     const f = fixture();
     (f.chain.getTransactionReceipt as ReturnType<typeof vi.fn>).mockResolvedValue({
