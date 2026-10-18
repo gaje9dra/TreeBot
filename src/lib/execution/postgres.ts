@@ -19,7 +19,7 @@ export interface PortfolioAssetSnapshot {
 }
 export interface PortfolioSnapshot {
   accountId:string; quoteAssetAddress:string; assets:PortfolioAssetSnapshot[];
-  realizedPnlByQuoteAsset:Array<{quoteAssetAddress:string;realizedPnlBaseUnits:string}>;
+  realizedPnlBeforeGasByQuoteAsset:Array<{quoteAssetAddress:string;realizedPnlBaseUnits:string}>;
   pendingTradeAccountingCount:number; valuationComplete:boolean;
   totalMarketValueQuoteBaseUnits:string|null; totalUnrealizedPnlQuoteBaseUnits:string|null;
 }
@@ -836,7 +836,7 @@ export class PostgresExecutionStore {
     const totalUnrealizedPnlQuoteBaseUnits=valuationComplete?snapshots.reduce((sum,asset)=>sum+BigInt(asset.unrealizedPnlQuoteBaseUnits!),0n).toString():null;
     return {
       accountId,quoteAssetAddress:quote,assets:snapshots,
-      realizedPnlByQuoteAsset:pnlRows.rows.map((row)=>({quoteAssetAddress:String(row.quote_asset),realizedPnlBaseUnits:String(row.pnl)})),
+      realizedPnlBeforeGasByQuoteAsset:pnlRows.rows.map((row)=>({quoteAssetAddress:String(row.quote_asset),realizedPnlBaseUnits:String(row.pnl)})),
       pendingTradeAccountingCount:Number(pendingRows.rows[0]?.count??0),valuationComplete,
       totalMarketValueQuoteBaseUnits,totalUnrealizedPnlQuoteBaseUnits,
     };
