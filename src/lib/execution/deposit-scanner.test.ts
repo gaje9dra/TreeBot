@@ -37,7 +37,7 @@ function fixture() {
   let nextBlock = 100n;
   let lastHash: Hash | null = null;
   const observations = new Map<string, { accountId: string; amount: string; blockHash: Hash; status: string }>();
-  let credited = new Set<string>();
+  const credited = new Set<string>();
   const store: DepositScannerStore = {
     getOrCreateCheckpoint: vi.fn(async () => ({ nextBlock, lastScannedBlockHash: lastHash })),
     commitScannedRange: vi.fn(async ({ expectedNextBlock, nextBlock: next, lastScannedBlockHash, observations: found }) => {
