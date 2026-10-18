@@ -333,6 +333,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
       [accountId, prefix + "-withdrawal-funding", token, hash(800)],
     );
+    await pool.query("INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units) VALUES(137,$1,LOWER($2),1000)",[accountId,token]);
     await pool.query(
       "INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')",
       [source, token],
@@ -425,6 +426,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
       [wallet, prefix + "-trade-withdrawal-funding", token, hash(910)],
     );
+    await pool.query("INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units) VALUES(137,$1,LOWER($2),1000)",[wallet,token]);
     await pool.query(
       "INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')",
       [wallet, token],
