@@ -20,7 +20,10 @@ function toRecord(row:Record<string,unknown>):StoredExecutionIntent{
     txHash:row.tx_hash?String(row.tx_hash):null,nonce:row.nonce===null||row.nonce===undefined?null:Number(row.nonce)};
 }
 export class PostgresExecutionStore {
-  constructor(private readonly pool:Pool){}
+  private readonly accountingQuoteToken:string|null;
+  constructor(private readonly pool:Pool,accountingQuoteToken=process.env.TREEBOT_ACCOUNTING_QUOTE_TOKEN??""){
+    this.accountingQuoteToken=/^0x[0-9a-fA-F]{40}$/.test(accountingQuoteToken)?accountingQuoteToken.toLowerCase():null;
+  }
   async createOrGetIntent(input:ExecutionIntentInput):Promise<{record:StoredExecutionIntent;created:boolean}>{
     if(!input.id.trim()||!input.idempotencyKey.trim())throw new Error("Intent ID and idempotency key are required.");
     if(!/^0x[0-9a-fA-F]{40}$/.test(input.walletAddress)||!/^0x[0-9a-fA-F]{40}$/.test(input.sellToken)||!/^0x[0-9a-fA-F]{40}$/.test(input.buyToken))throw new Error("Intent wallet and token addresses must be valid.");
@@ -39,6 +42,10 @@ export class PostgresExecutionStore {
       );
       if(restriction.rowCount)throw new Error("Execution blocked because this account has an active financial-integrity restriction.");
       if(!/^0x[0-9a-fA-F]{40}$/.test(target))throw new Error("Prepared transaction target must be an explicit address.");
+      if(!this.accountingQuoteToken)throw new Error("Trade preparation is disabled until a canonical accounting quote token is configured.");
+      const sellIsQuote=input.sellToken.toLowerCase()===this.accountingQuoteToken;
+      const buyIsQuote=input.buyToken.toLowerCase()===this.accountingQuoteToken;
+      if(!sellIsQuote&&!buyIsQuote)throw new Error("Cross-asset trade is blocked until trusted valuation conversion is implemented for the configured accounting quote token.");
 
       const sameIntent=async()=>c.query(
         `SELECT 1 FROM execution_transactions WHERE id=$1 AND idempotency_key=$2
@@ -84,6 +91,15 @@ export class PostgresExecutionStore {
       const ledgerAmount=BigInt(ledger.rows[0]?.amount??"0");
       const inventoryAmount=BigInt(inventory.rows[0]?.amount??"0");
       if(ledgerAmount!==inventoryAmount)throw new Error("Trade reservation blocked by a ledger/inventory mismatch requiring reconciliation.");
+      if(!sellIsQuote){
+        const basis=await c.query(
+          "SELECT quantity_base_units::text AS quantity,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) FOR SHARE",
+          [input.walletAddress,input.sellToken,this.accountingQuoteToken],
+        );
+        if(!basis.rows[0]||basis.rows[0].cost_basis_status!=="complete"||BigInt(String(basis.rows[0].quantity))!==inventoryAmount||sellAmount>inventoryAmount){
+          throw new Error("Trade sale blocked because complete quote-token cost basis does not cover the full inventory quantity.");
+        }
+      }
       const heldWithdrawals=await c.query(
         `SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_withdrawal_reservations
          WHERE (LOWER(account_id)=LOWER($1) OR LOWER(source_address)=LOWER($1))
@@ -124,6 +140,16 @@ export class PostgresExecutionStore {
     const r=await this.pool.query(`WITH candidate AS (
       SELECT id FROM execution_transactions
       WHERE status='prepared' AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
+        AND $2::text IS NOT NULL
+        AND (LOWER(execution_transactions.sell_token)=LOWER($2) OR LOWER(execution_transactions.buy_token)=LOWER($2))
+        AND (LOWER(execution_transactions.sell_token)=LOWER($2) OR EXISTS (
+          SELECT 1 FROM execution_open_positions p
+          JOIN execution_position_inventory i ON i.chain_id=137 AND LOWER(i.account_id)=LOWER(p.account_id) AND LOWER(i.asset_address)=LOWER(p.asset_address)
+          WHERE LOWER(p.account_id)=LOWER(execution_transactions.wallet_address)
+            AND LOWER(p.asset_address)=LOWER(execution_transactions.sell_token)
+            AND LOWER(p.quote_asset_address)=LOWER($2) AND p.cost_basis_status='complete'
+            AND p.quantity_base_units=i.quantity_base_units AND p.quantity_base_units>=execution_transactions.sell_amount
+        ))
         AND EXISTS (SELECT 1 FROM execution_control WHERE id=1 AND emergency_stop=FALSE)
         AND NOT EXISTS (
           SELECT 1 FROM execution_account_restrictions r
@@ -141,8 +167,8 @@ export class PostgresExecutionStore {
             AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_targets) AS allowed(target) WHERE LOWER(allowed.target)=LOWER(execution_transactions.prepared_transaction->>'to'))
         )
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
-      FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,leaseMs]);
+      UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($3::text||' milliseconds')::interval,updated_at=NOW()
+      FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,this.accountingQuoteToken,leaseMs]);
     const row=r.rows[0] as Record<string,unknown>|undefined;return row?toRecord(row):null;
   }
   async recordBroadcast(id:string,workerId:string,txHash:string,nonce:number):Promise<void>{
