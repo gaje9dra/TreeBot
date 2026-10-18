@@ -63,7 +63,7 @@ export function validateReviewedSwapCalldata(
   if (expected.chainId !== 137) throw new Error("Only Polygon chain ID 137 is supported.");
   if (!/^0x[0-9a-fA-F]{8}/.test(expected.data)) throw new Error("Malformed swap calldata selector.");
   const addresses = [expected.target, expected.sellToken, expected.buyToken, expected.recipient];
-  if (!addresses.every(isAddress)) throw new Error("Invalid swap semantic expectation address.");
+  if (!addresses.every((address) => isAddress(address))) throw new Error("Invalid swap semantic expectation address.");
   if (expected.spender != null && !isAddress(expected.spender)) throw new Error("Invalid expected spender.");
   if (expected.sellAmount <= 0n || expected.minimumOutput <= 0n) throw new Error("Swap amounts must be positive.");
   const target = getAddress(expected.target);
@@ -75,7 +75,7 @@ export function validateReviewedSwapCalldata(
   if (expected.data.slice(0, 10).toLowerCase() !== selector.toLowerCase()) {
     throw new Error("Swap calldata selector does not match the reviewed route.");
   }
-  let decoded: ReturnType<typeof decodeFunctionData>;
+  let decoded: { functionName: string; args: readonly unknown[] };
   try {
     decoded = decodeFunctionData({ abi: route.abi, data: expected.data });
   } catch {

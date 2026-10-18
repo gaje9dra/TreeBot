@@ -59,6 +59,8 @@ export interface VerifyDepositRequest {
   tokenAddress: string;
   vaultAddress: string;
   minimumAmount: string;
+  /** Must be a token explicitly enabled in the deployment configuration. */
+  supportedTokenAddresses: readonly string[];
 }
 
 export class DepositVerificationError extends Error {
@@ -94,6 +96,9 @@ export class TrustedDepositWatcher {
     const account = getAddress(request.accountAddress);
     const token = getAddress(request.tokenAddress);
     const vault = getAddress(request.vaultAddress);
+    if (!request.supportedTokenAddresses.some((configured) => isAddress(configured) && getAddress(configured) === token)) {
+      throw new DepositVerificationError("Token is not in the configured deposit allowlist.");
+    }
     const hash = request.transactionHash as Hash;
 
     if (await this.chain.getChainId() !== 137) throw new DepositVerificationError("Deposits are accepted only on Polygon chain ID 137.");

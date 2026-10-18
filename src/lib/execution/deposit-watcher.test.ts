@@ -9,7 +9,6 @@ import {
   type Hex,
 } from "viem";
 import {
-  DepositVerificationError,
   TrustedDepositWatcher,
   type DepositChainReader,
   type DepositReceipt,
@@ -59,6 +58,7 @@ const request = {
   tokenAddress: token,
   vaultAddress: vault,
   minimumAmount: "2000000",
+  supportedTokenAddresses: [token],
 };
 
 describe("TrustedDepositWatcher", () => {
@@ -76,6 +76,13 @@ describe("TrustedDepositWatcher", () => {
       confirmed: true,
       requiredConfirmations: 64,
     }));
+  });
+
+  it("rejects unsupported tokens before querying for credit", async () => {
+    const { chain, store } = fixture();
+    await expect(new TrustedDepositWatcher(chain, store, 1).verifyAndCredit({ ...request, supportedTokenAddresses: [vault] }))
+      .rejects.toThrow(/allowlist/);
+    expect(store.recordDepositEvent).not.toHaveBeenCalled();
   });
 
   it("does not credit before the confirmation threshold", async () => {
