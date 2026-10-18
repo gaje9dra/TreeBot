@@ -138,7 +138,7 @@ export async function assertRpcProviderAgreement(
 }
 
 type WorkerStatus = "starting" | "running" | "degraded" | "stopped" | "disabled";
-type AlertType = "rpc_error" | "rpc_disagreement" | "scanner_stalled" | "uncredited_deposit" | "financial_incident" | "alert_delivery_failed" | "configuration_error" | "database_error";
+type AlertType = "rpc_error" | "rpc_disagreement" | "scanner_stalled" | "uncredited_deposit" | "financial_incident" | "alert_delivery_failed" | "configuration_error" | "database_error" | "cost_basis_pending";
 
 async function heartbeat(pool: Pool, input: {
   workerKey: string; status: WorkerStatus; lastSuccess: boolean; lastScannedBlock?: string;
@@ -232,6 +232,13 @@ export async function runDepositWorker(input:{
       const incidentCount=Number(incidents.rows[0]?.count??0);
       if(incidentCount>0)await alertIfNeeded(input.pool,input.settings,{type:"financial_incident",severity:"critical",details:{count:incidentCount}});
       else await resolveAlert(input.pool,input.settings.workerKey,"financial_incident");
+
+      const pendingAccounting=await input.pool.query(
+        "SELECT COUNT(*)::text AS count FROM execution_trade_accounting WHERE accounting_status IN('pending','reconciliation_required')",
+      );
+      const pendingAccountingCount=Number(pendingAccounting.rows[0]?.count??0);
+      if(pendingAccountingCount>0)await alertIfNeeded(input.pool,input.settings,{type:"cost_basis_pending",severity:"warning",details:{count:pendingAccountingCount}});
+      else await resolveAlert(input.pool,input.settings.workerKey,"cost_basis_pending");
     }catch(error){
       consecutiveErrors+=1;
       const message=(error instanceof Error?error.message:"Unknown deposit worker error.").slice(0,1000);
