@@ -28,7 +28,7 @@ export class ViemPolygonDepositReader implements DepositRangeReader {
     if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
       throw new Error("POLYGON_RPC_URL must use HTTPS outside local development.");
     }
-    this.publicClient = client ?? createPublicClient({ chain: polygon, transport: http(url.toString(), { timeout: 10_000 }) }) as PublicClient;
+    this.publicClient = client ?? createPublicClient({ chain: polygon, transport: http(url.toString(), { timeout: 10_000, retryCount: 2, retryDelay: 500 }) }) as PublicClient;
   }
 
   async getChainId(): Promise<number> {
