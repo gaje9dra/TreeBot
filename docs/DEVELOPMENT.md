@@ -14,7 +14,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open `http://localhost:3000`. Wallet balance queries require the browser wallet to be connected and use the wallet RPC. Server-side on-chain reads require `POLYGON_RPC_URL`.
+Open `http://localhost:3000`. Wallet balance queries use the connected browser wallet RPC. The Live market data panel calls `GET /api/market/snapshot?pair=WMATIC%2FUSDC`; the configured provider must implement `GET {MARKET_DATA_BASE_URL}/snapshot?pair=...` and return the normalized snapshot contract described in `src/lib/market/provider.ts`. The Historical backtest panel calls `POST /api/backtest` and reports simulated replay only. Server-side on-chain reads require `POLYGON_RPC_URL`.
 
 ## Environment variables
 
@@ -23,8 +23,8 @@ Open `http://localhost:3000`. Wallet balance queries require the browser wallet 
 | `NEXT_PUBLIC_CHAIN_ID` | Expected Polygon chain ID | `137`; configuration rejects other chains |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | WalletConnect project ID | Optional until connector is configured |
 | `POLYGON_RPC_URL` | Trusted server-side RPC URL | HTTPS required outside localhost |
-| `MARKET_DATA_BASE_URL` | Approved provider's API base URL | Not wired to a market feed yet |
-| `MARKET_DATA_API_KEY` | Provider secret | Server-side only; never use a `NEXT_PUBLIC_` prefix |
+| `MARKET_DATA_BASE_URL` | Trusted provider base URL | Server requests `GET {base}/snapshot?pair=...`; response must match the normalized snapshot schema and include at least 22 ordered candles |
+| `MARKET_DATA_API_KEY` | Provider secret | Sent as a server-side Bearer token; never use a `NEXT_PUBLIC_` prefix |
 | `TREEBOT_TRADING_MODE` | Intended runtime mode | `paper` only |
 | `TREEBOT_LIVE_TRADING_ENABLED` | Additional live gate | Must remain `false`; live adapter absent |
 | `TREEBOT_DEPOSITS_ENABLED` | Deposit gate | Must remain `false`; current config rejects `true` |

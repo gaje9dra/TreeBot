@@ -8,6 +8,8 @@ import {
 import { formatEther, isAddress, type Address } from "viem";
 import { polygon } from "viem/chains";
 import { assessNativeCapital, validateConnectedChain } from "@/lib/wallet/polygon";
+import type { BacktestReport } from "@/lib/trading/backtest";
+import type { MarketSnapshot } from "@/lib/trading/types";
 
 type FeedEvent = { title: string; detail: string; time: string; type: "info" | "warn" | "good" };
 type Eip1193Provider = {
@@ -46,6 +48,16 @@ export default function HomePage() {
   const [switching, setSwitching] = useState(false);
   const [walletError, setWalletError] = useState<string>();
   const [walletProviderAvailable, setWalletProviderAvailable] = useState(false);
+  const [marketPair, setMarketPair] = useState("WMATIC/USDC");
+  const [marketSnapshot, setMarketSnapshot] = useState<MarketSnapshot>();
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketError, setMarketError] = useState<string>();
+  const [marketCheckedAt, setMarketCheckedAt] = useState<number>();
+  const [backtestEquity, setBacktestEquity] = useState("1000");
+  const [backtestNotional, setBacktestNotional] = useState("100");
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestError, setBacktestError] = useState<string>();
+  const [backtestReport, setBacktestReport] = useState<BacktestReport>();
 
   const chain = useMemo(() => validateConnectedChain(chainId), [chainId]);
   const capital = useMemo(() => balanceWei === undefined ? null : assessNativeCapital(balanceWei), [balanceWei]);
@@ -107,6 +119,56 @@ export default function HomePage() {
       provider.removeListener?.("chainChanged", handleChainChanged);
     };
   }, [logEvent, refreshWallet]);
+
+
+  async function refreshMarketData() {
+    const pair = marketPair.trim();
+    setMarketLoading(true);
+    setMarketError(undefined);
+    try {
+      const response = await fetch("/api/market/snapshot?pair=" + encodeURIComponent(pair), { cache: "no-store" });
+      const payload = await response.json() as { data?: MarketSnapshot; error?: string };
+      if (!response.ok || !payload.data) throw new Error(payload.error ?? "Market provider returned no snapshot.");
+      setMarketSnapshot(payload.data);
+      setMarketCheckedAt(Date.now());
+      logEvent("Market data refreshed", payload.data.pair + " · " + payload.data.candles.length + " validated candles · provider timestamp checked", "good");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Market data request failed.";
+      setMarketSnapshot(undefined);
+      setMarketError(message);
+      logEvent("Market data unavailable", message, "warn");
+    } finally {
+      setMarketLoading(false);
+    }
+  }
+
+  async function runBacktest() {
+    setBacktestLoading(true);
+    setBacktestError(undefined);
+    setBacktestReport(undefined);
+    try {
+      const response = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          pair: marketPair.trim(),
+          startingEquityQuote: Number(backtestEquity),
+          notionalQuote: Number(backtestNotional)
+        })
+      });
+      const payload = await response.json() as { report?: BacktestReport; error?: string };
+      if (!response.ok || !payload.report) throw new Error(payload.error ?? "Backtest could not be completed.");
+      setBacktestReport(payload.report);
+      logEvent("Historical backtest completed", payload.report.tradeCount + " simulated round trips · " + payload.report.netReturnPercent.toFixed(2) + "% modeled net return", "info");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Backtest request failed.";
+      setBacktestError(message);
+      logEvent("Backtest unavailable", message, "warn");
+    } finally {
+      setBacktestLoading(false);
+    }
+  }
 
   async function connectWallet() {
     const provider = getInjectedProvider();
@@ -215,6 +277,52 @@ export default function HomePage() {
           <div className="callout" style={{ marginTop: 17 }}><AlertTriangle size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />This dashboard does not currently submit blockchain transactions. A production trading adapter and independent security review are mandatory before real funds can be exposed.</div>
         </section>
       </div>
+
+
+      <div className="section-head"><h2>Live market data</h2><span className={"status " + (marketSnapshot ? "good" : "warn")}>{marketSnapshot ? "FRESH PROVIDER SNAPSHOT" : "PROVIDER NOT VERIFIED"}</span></div>
+      <section className="card">
+        <div className="market-controls">
+          <label className="field-label" htmlFor="market-pair">Provider pair identifier
+            <input id="market-pair" className="field" value={marketPair} maxLength={64} onChange={(event) => setMarketPair(event.target.value)} placeholder="WMATIC/USDC" />
+          </label>
+          <button className="btn btn-primary" disabled={marketLoading || !marketPair.trim()} onClick={() => void refreshMarketData()}>{marketLoading ? "Fetching provider data…" : "Fetch market snapshot"}</button>
+        </div>
+        {marketError && <div className="callout" style={{ marginTop: 14 }}>Market data unavailable: {marketError}</div>}
+        {marketSnapshot ? <>
+          <div className="grid" style={{ marginTop: 16 }}>
+            <Metric icon={<Activity size={14} />} label="MARKET PRICE" value={marketSnapshot.price.toPrecision(8) + " " + marketSnapshot.quoteToken} meta={"Base token: " + marketSnapshot.baseToken} />
+            <Metric icon={<Gauge size={14} />} label="24H VOLUME" value={marketSnapshot.volume24h.toLocaleString()} meta="Provider-reported volume; units depend on provider contract" />
+            <Metric icon={<Blocks size={14} />} label="LIQUIDITY (USD)" value={"$" + marketSnapshot.liquidityUsd.toLocaleString()} meta="Provider-reported liquidity estimate" />
+            <Metric icon={<ShieldCheck size={14} />} label="HISTORY / EXIT" value={marketSnapshot.candles.length + " candles"} meta={marketSnapshot.executableExit ? "Provider reports exit route available; not independently executed" : "No executable exit route reported"} tone={marketSnapshot.executableExit ? "good" : "warn"} />
+          </div>
+          <p className="meta" style={{ marginTop: 12 }}>Snapshot timestamp: {new Date(marketSnapshot.observedAt).toLocaleString()} · Last fetched in this browser: {marketCheckedAt ? new Date(marketCheckedAt).toLocaleTimeString() : "—"}. Freshness is checked server-side; this view does not place orders.</p>
+        </> : <div className="empty">No provider data loaded. Configure MARKET_DATA_BASE_URL to a trusted HTTPS service implementing the normalized snapshot contract, then fetch a snapshot. No sample or fallback prices are shown.</div>}
+      </section>
+
+      <div className="section-head"><h2>Historical backtest</h2><span className="eyebrow">SIMULATED · NOT EARNINGS</span></div>
+      <section className="card">
+        <div className="market-controls">
+          <label className="field-label" htmlFor="backtest-equity">Starting quote equity
+            <input id="backtest-equity" className="field" inputMode="decimal" value={backtestEquity} onChange={(event) => setBacktestEquity(event.target.value)} />
+          </label>
+          <label className="field-label" htmlFor="backtest-notional">Order notional per entry
+            <input id="backtest-notional" className="field" inputMode="decimal" value={backtestNotional} onChange={(event) => setBacktestNotional(event.target.value)} />
+          </label>
+          <button className="btn btn-primary" disabled={backtestLoading || marketLoading} onClick={() => void runBacktest()}>{backtestLoading ? "Running replay…" : "Run backtest"}</button>
+        </div>
+        <p className="meta" style={{ marginTop: 12 }}>The backtest replays provider-supplied historical candles and models fees, slippage, and gas. Quote equity is a simulation input, not your wallet balance. No real transactions occur.</p>
+        {backtestError && <div className="callout" style={{ marginTop: 14 }}>Backtest unavailable: {backtestError}</div>}
+        {backtestReport && <>
+          <div className="grid" style={{ marginTop: 16 }}>
+            <Metric icon={<Activity size={14} />} label="MODELED NET RETURN" value={backtestReport.netReturnPercent.toFixed(2) + "%"} meta="Historical replay; no profit guarantee" tone={backtestReport.netReturnPercent >= 0 ? "good" : "warn"} />
+            <Metric icon={<Gauge size={14} />} label="MAX DRAWDOWN" value={backtestReport.maximumDrawdownPercent.toFixed(2) + "%"} meta="Peak-to-trough modeled decline" tone="warn" />
+            <Metric icon={<Blocks size={14} />} label="ROUND TRIPS" value={String(backtestReport.tradeCount)} meta={"Win rate " + backtestReport.winRate.toFixed(1) + "%"} />
+            <Metric icon={<ShieldCheck size={14} />} label="FINAL QUOTE EQUITY" value={backtestReport.finalEquityQuote.toFixed(2)} meta={"Buy-and-hold benchmark " + backtestReport.benchmarkReturnPercent.toFixed(2) + "%"} />
+          </div>
+          <div className="risk-row"><span>Modeled fees / slippage / gas</span><strong>{backtestReport.feesQuote.toFixed(4)} / {backtestReport.slippageQuote.toFixed(4)} / {backtestReport.gasQuote.toFixed(4)}</strong></div>
+          <div className="callout" style={{ marginTop: 14 }}>{backtestReport.notes.join(" ")}</div>
+        </>}
+      </section>
 
       <div className="section-head"><h2>System activity</h2><span className="eyebrow">LOCAL SYSTEM EVENTS · NOT A LIVE CHAIN FEED</span></div>
       <section className="card">
