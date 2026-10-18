@@ -79,4 +79,11 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Audit full dependency tree
-        run: npm audit --audit-level=high
+        run: |
+          audit_status=0
+          npm audit --json > npm-audit.json || audit_status=$?
+          if [ "$audit_status" -gt 1 ]; then
+            cat npm-audit.json
+            exit "$audit_status"
+          fi
+          node scripts/security-audit.mjs npm-audit.json
