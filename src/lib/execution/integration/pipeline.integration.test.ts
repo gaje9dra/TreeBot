@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPublicClient, http, parseAbi, encodeFunctionData, type Address } from "viem";
-import { polygon } from "viem/chains";
+import type { Address } from "viem";
 import { PolygonExecutionReadClient } from "../evm-client";
-import { ZeroExPolygonQuoteAdapter } from "../zero-ex";
 import { PolygonExecutionPipeline } from "../pipeline";
 import { assertLiveExecutionUnavailable } from "../authorization";
 
