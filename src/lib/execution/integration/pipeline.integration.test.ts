@@ -7,10 +7,10 @@ import { assertLiveExecutionUnavailable } from "../authorization";
 const rpcUrl = process.env.TREEBOT_INTEGRATION_RPC_URL;
 const enabled = process.env.TREEBOT_RUN_CHAIN_INTEGRATION === "true" && Boolean(rpcUrl);
 const describeChain = enabled ? describe : describe.skip;
-const owner = (process.env.TREEBOT_TEST_WALLET_ADDRESS ?? "0x0000000000000000000000000000000000000003") as Address;
-const sell = (process.env.TREEBOT_TEST_SELL_TOKEN ?? "0x0000000000000000000000000000000000000001") as Address;
-const buy = (process.env.TREEBOT_TEST_BUY_TOKEN ?? "0x0000000000000000000000000000000000000002") as Address;
-const target = (process.env.TREEBOT_TEST_TARGET ?? "0x0000000000000000000000000000000000000004") as Address;
+const owner = (process.env.TREEBOT_TEST_WALLET_ADDRESS || "0x0000000000000000000000000000000000000003") as Address;
+const sell = (process.env.TREEBOT_TEST_SELL_TOKEN || "0x0000000000000000000000000000000000000001") as Address;
+const buy = (process.env.TREEBOT_TEST_BUY_TOKEN || "0x0000000000000000000000000000000000000002") as Address;
+const target = (process.env.TREEBOT_TEST_TARGET || "0x0000000000000000000000000000000000000004") as Address;
 
 function checkedAddress(value: string, label: string): Address {
   if (!isAddress(value, { strict: false })) throw new Error(`Invalid ${label} address configuration.`);
