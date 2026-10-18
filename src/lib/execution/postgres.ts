@@ -70,6 +70,7 @@ export class PostgresExecutionStore {
       const allowedTokens=Array.isArray(auth.allowed_tokens)?auth.allowed_tokens as string[]:[];
       const allowedTargets=Array.isArray(auth.allowed_targets)?auth.allowed_targets as string[]:[];
       if(!allowedTokens.some((value)=>value.toLowerCase()===input.sellToken.toLowerCase())||
+        !allowedTokens.some((value)=>value.toLowerCase()===input.buyToken.toLowerCase())||
         !allowedTargets.some((value)=>value.toLowerCase()===target.toLowerCase())){
         throw new Error("Execution authorization does not allow this sell token or transaction target.");
       }
