@@ -233,17 +233,18 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     const watcherKey = prefix + "-proof-credit";
     const accountId = prefix + "-proof-account";
     const txHash = hash(701);
+    const proofSender = "0x0000000000000000000000000000000000000040" as Address;
     const blockHash = hash(700);
     await store.getOrCreateCheckpoint({ chainId: 137, watcherKey, initialBlock: 700n });
     const event = {
       chainId: 137 as const, transactionHash: txHash, logIndex: 1, accountId,
-      assetAddress: token, senderAddress: sender, vaultAddress: vault, amountBaseUnits: "1234567",
+      assetAddress: token, senderAddress: proofSender, vaultAddress: vault, amountBaseUnits: "1234567",
       blockNumber: "700", blockHash, confirmations: 64, requiredConfirmations: 64,
     };
     const forged = { ...event, proof: {
       chainId: 137, transactionHash: txHash, receiptTransactionHash: txHash, receiptStatus: "success",
       receiptBlockNumber: "700", receiptBlockHash: blockHash, logIndex: 1, accountId, tokenAddress: token,
-      senderAddress: sender, recipientAddress: vault, amountBaseUnits: "1234567",
+      senderAddress: proofSender, recipientAddress: vault, amountBaseUnits: "1234567",
       blockNumber: "700", blockHash, tokenDecimals: 6,
     } as unknown as import("../deposit-proof").VerifiedDepositProof };
     await expect(store.commitScannedRange({
@@ -269,13 +270,13 @@ describePostgres("PostgresDepositScannerStore integration", () => {
         transactionHash: txHash, status: "success" as const, blockNumber: 700n, blockHash,
         logs: [{
           address: token, logIndex: 1, data: amountData,
-          topics: [transferTopic, addressTopic(sender), addressTopic(vault)],
+          topics: [transferTopic, addressTopic(proofSender), addressTopic(vault)],
         }],
       }),
-      getTransaction: async () => ({ hash: txHash, from: sender, to: token, input: "0xa9059cbb" as Hex }),
+      getTransaction: async () => ({ hash: txHash, from: proofSender, to: token, input: "0xa9059cbb" as Hex }),
       getLogs: async () => [{
         transactionHash: txHash, blockNumber: 700n, blockHash, logIndex: 1,
-        tokenAddress: token, senderAddress: sender, recipientAddress: vault, amount: BigInt(event.amountBaseUnits),
+        tokenAddress: token, senderAddress: proofSender, recipientAddress: vault, amount: BigInt(event.amountBaseUnits),
       }],
     } as unknown as DepositRangeReader;
     const scanner = new PolygonDepositScanner(fakeChain, store, {
