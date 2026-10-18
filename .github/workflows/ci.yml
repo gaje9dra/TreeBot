@@ -55,5 +55,7 @@ jobs:
         run: npm install
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
-      - name: Audit all dependencies
-        run: npm audit --audit-level=high
+      - name: Audit all dependencies with scoped exception
+        run: |
+          npm audit --json > /tmp/treebot-npm-audit.json || true
+          node scripts/security-audit.mjs /tmp/treebot-npm-audit.json

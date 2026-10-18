@@ -10,6 +10,12 @@
 - Wallet connect is not transaction authorization.
 - Token, router, chain, allowance, spending, slippage and deadline checks are mandatory before any future swap integration.
 
+## Dependency audit posture
+
+- CI runs `npm audit --omit=dev --audit-level=high` as a hard production-dependency gate.
+- CI also audits the full dependency tree. One narrowly scoped temporary exception is retained for `braces` / GHSA-vfj7-8cjw-p6xm, a high-severity advisory with no patched upstream release as of 2026-10-18. It is pulled by development lint tooling, is not a direct dependency, and is not present in the production dependency audit.
+- The exception is identity-specific: any other high/critical advisory fails CI. The finding is printed in CI logs and must be removed once a fixed upstream release exists. Do not broaden or renew it automatically.
+
 ## Required before real funds
 
 1. Review the exact DEX/aggregator integration docs and verify Polygon deployment addresses from primary sources.
