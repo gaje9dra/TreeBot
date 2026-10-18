@@ -22,31 +22,95 @@ export class PostgresExecutionStore {
   constructor(private readonly pool:Pool){}
   async createOrGetIntent(input:ExecutionIntentInput):Promise<{record:StoredExecutionIntent;created:boolean}>{
     if(!input.id.trim()||!input.idempotencyKey.trim())throw new Error("Intent ID and idempotency key are required.");
+    if(!/^0x[0-9a-fA-F]{40}$/.test(input.walletAddress)||!/^0x[0-9a-fA-F]{40}$/.test(input.sellToken)||!/^0x[0-9a-fA-F]{40}$/.test(input.buyToken))throw new Error("Intent wallet and token addresses must be valid.");
     if(input.sellToken.toLowerCase()===input.buyToken.toLowerCase())throw new Error("Sell and buy token must differ.");
-    assertPositiveBaseUnits(input.sellAmount,"sell amount");
+    const sellAmount=assertPositiveBaseUnits(input.sellAmount,"sell amount");
+    const target=String(input.preparedTransaction.to??"");
+    if(!/^0x[0-9a-fA-F]{40}$/.test(target))throw new Error("Prepared transaction target must be an explicit address.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.walletAddress.toLowerCase()]);
-      const restriction = await c.query(
-        `SELECT 1 FROM execution_account_restrictions
-         WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1`,
+      // Trade and withdrawal reservations for the same wallet/asset share this lock.
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.walletAddress.toLowerCase(),input.sellToken.toLowerCase()]);
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",["treebot-account-restriction",input.walletAddress.toLowerCase()]);
+      const restriction=await c.query(
+        "SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",
         [input.walletAddress],
       );
-      if (restriction.rowCount) throw new Error("Execution blocked because this account has an active financial-integrity restriction.");
+      if(restriction.rowCount)throw new Error("Execution blocked because this account has an active financial-integrity restriction.");
+
+      const sameIntent=async()=>c.query(
+        `SELECT 1 FROM execution_transactions WHERE id=$1 AND idempotency_key=$2
+          AND LOWER(wallet_address)=LOWER($3) AND LOWER(sell_token)=LOWER($4) AND LOWER(buy_token)=LOWER($5)
+          AND sell_amount=$6 AND quote=$7::jsonb AND authorization_id=$8 AND risk_checks=$9::jsonb
+          AND prepared_transaction=$10::jsonb`,
+        [input.id,input.idempotencyKey,input.walletAddress,input.sellToken,input.buyToken,sellAmount.toString(),
+          JSON.stringify(input.quote),input.authorizationId,JSON.stringify(input.riskChecks),JSON.stringify(input.preparedTransaction)],
+      );
+      const duplicate=await c.query("SELECT * FROM execution_transactions WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
+      if(duplicate.rowCount){
+        if(!(await sameIntent()).rowCount)throw new Error("Execution idempotency key was reused with different immutable transaction parameters.");
+        const record=toRecord(duplicate.rows[0] as Record<string,unknown>);
+        await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'idempotent_replay',$2::jsonb)",
+          [record.id,JSON.stringify({idempotencyKey:input.idempotencyKey})]);
+        await c.query("COMMIT");return {record,created:false};
+      }
+      const idCollision=await c.query("SELECT 1 FROM execution_transactions WHERE id=$1",[input.id]);
+      if(idCollision.rowCount)throw new Error("Execution intent ID already belongs to another reservation.");
+
+      const authorization=await c.query(
+        "SELECT owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount::text,expires_at,revoked_at FROM execution_authorizations WHERE id=$1 FOR SHARE",
+        [input.authorizationId],
+      );
+      const auth=authorization.rows[0];
+      if(!auth||Number(auth.chain_id)!==137||String(auth.owner_address).toLowerCase()!==input.walletAddress.toLowerCase()||
+        auth.revoked_at||new Date(auth.expires_at).getTime()<=Date.now()||BigInt(String(auth.maximum_sell_amount))<sellAmount){
+        throw new Error("Execution authorization is missing, expired, revoked, owner-mismatched, or below the requested amount.");
+      }
+      const allowedTokens=Array.isArray(auth.allowed_tokens)?auth.allowed_tokens as string[]:[];
+      const allowedTargets=Array.isArray(auth.allowed_targets)?auth.allowed_targets as string[]:[];
+      if(!allowedTokens.some((value)=>value.toLowerCase()===input.sellToken.toLowerCase())||
+        !allowedTargets.some((value)=>value.toLowerCase()===target.toLowerCase())){
+        throw new Error("Execution authorization does not allow this sell token or transaction target.");
+      }
+
+      const ledger=await c.query(
+        "SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",
+        [input.walletAddress,input.sellToken],
+      );
+      const heldWithdrawals=await c.query(
+        `SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_withdrawal_reservations
+         WHERE (LOWER(account_id)=LOWER($1) OR LOWER(source_address)=LOWER($1))
+           AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')`,
+        [input.walletAddress,input.sellToken],
+      );
+      const heldTrades=await c.query(
+        `SELECT COALESCE(SUM(sell_amount),0)::text AS amount FROM execution_transactions
+         WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(sell_token)=LOWER($2)
+           AND status IN('prepared','awaiting_signature','signed','submitted','pending','unknown','replaced')`,
+        [input.walletAddress,input.sellToken],
+      );
+      const available=BigInt(ledger.rows[0]?.amount??"0")-BigInt(heldWithdrawals.rows[0]?.amount??"0")-BigInt(heldTrades.rows[0]?.amount??"0");
+      if(available<0n||sellAmount>available)throw new Error("Execution exceeds available ledger balance after active trade and withdrawal reservations.");
+
       const inserted=await c.query(`INSERT INTO execution_transactions
         (id,idempotency_key,chain_id,wallet_address,sell_token,buy_token,side,sell_amount,quote,authorization_id,risk_checks,prepared_transaction,status)
-        VALUES($1,$2,137,$3,$4,$5,'sell',$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,'prepared')
+        VALUES($1,$2,137,$3,LOWER($4),LOWER($5),'sell',$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,'prepared')
         ON CONFLICT(idempotency_key) DO NOTHING RETURNING *`,
-        [input.id,input.idempotencyKey,input.walletAddress,input.sellToken,input.buyToken,input.sellAmount,
+        [input.id,input.idempotencyKey,input.walletAddress,input.sellToken,input.buyToken,sellAmount.toString(),
           JSON.stringify(input.quote),input.authorizationId,JSON.stringify(input.riskChecks),JSON.stringify(input.preparedTransaction)]);
-      const created=inserted.rowCount===1;
-      const res=created?inserted:await c.query("SELECT * FROM execution_transactions WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
-      const row=res.rows[0] as Record<string,unknown>|undefined;if(!row)throw new Error("Idempotency reservation disappeared.");
-      const record=toRecord(row);
-      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,$2,$3::jsonb)",
-        [record.id,created?"intent_reserved":"idempotent_replay",JSON.stringify({idempotencyKey:input.idempotencyKey})]);
-      await c.query("COMMIT");return {record,created};
+      if(inserted.rowCount!==1){
+        if(!(await sameIntent()).rowCount)throw new Error("Execution idempotency key was concurrently claimed by different immutable transaction parameters.");
+        const replay=await c.query("SELECT * FROM execution_transactions WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
+        const record=toRecord(replay.rows[0] as Record<string,unknown>);
+        await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'idempotent_replay',$2::jsonb)",
+          [record.id,JSON.stringify({idempotencyKey:input.idempotencyKey})]);
+        await c.query("COMMIT");return {record,created:false};
+      }
+      const record=toRecord(inserted.rows[0] as Record<string,unknown>);
+      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'intent_reserved',$2::jsonb)",
+        [record.id,JSON.stringify({idempotencyKey:input.idempotencyKey,sellAmount:sellAmount.toString(),availableBeforeReservation:available.toString()})]);
+      await c.query("COMMIT");return {record,created:true};
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
   async leasePreparedIntent(workerId:string,leaseMs=30_000):Promise<StoredExecutionIntent|null>{
