@@ -345,7 +345,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
 
     const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
     const addressTopic = (address: Address): Hex => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as Hex;
-    const chainFor = (txHash: Hash, blockNumber: number, status: "success" | "reverted", amount: string, gasUsed: bigint, gasPrice: bigint) => ({
+    const chainFor = (txHash: Hash, blockNumber: number, status: "success" | "reverted", amount: string, gasUsed: bigint, gasPrice: bigint, nonce: number) => ({
       getChainId: async () => 137,
       getTransactionReceipt: async () => ({
         transactionHash: txHash, status, blockNumber: BigInt(blockNumber), blockHash: hash(blockNumber),
@@ -357,14 +357,14 @@ describePostgres("PostgresDepositScannerStore integration", () => {
           logIndex: 9,
         }] : [],
       }),
-      getTransaction: async () => ({ hash: txHash, from: source, to: token }),
+      getTransaction: async () => ({ hash: txHash, from: source, to: token, nonce }),
       getBlockNumber: async () => 900n,
       getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({
         number: blockNumber, hash: hash(Number(blockNumber)), parentHash: hash(Number(blockNumber - 1n)),
       }),
     }) as unknown as WithdrawalChainReader;
     const successProof = await verifyWithdrawalSettlement(
-      chainFor(successHash, 802, "success", "700", 100_000n, 30n),
+      chainFor(successHash, 802, "success", "700", 100_000n, 30n, 21),
       { withdrawalId: winnerId, transactionHash: successHash, sourceAddress: source, tokenAddress: token,
         recipientAddress: recipient, amountBaseUnits: "700", requiredConfirmations: 64 },
     );
@@ -387,7 +387,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
 
     const revertedHash = hash(803);
     const revertedProof = await verifyWithdrawalSettlement(
-      chainFor(revertedHash, 803, "reverted", "200", 80_000n, 20n),
+      chainFor(revertedHash, 803, "reverted", "200", 80_000n, 20n, 22),
       { withdrawalId: unknownId, transactionHash: revertedHash, sourceAddress: source, tokenAddress: token,
         recipientAddress: recipient, amountBaseUnits: "200", requiredConfirmations: 64 },
     );
