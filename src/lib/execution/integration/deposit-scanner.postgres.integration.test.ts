@@ -502,6 +502,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
 
   it("settles trades only from verified receipts and computes quote-token realized P&L", async () => {
     const wallet = ("0x" + (hashSeed + 7000n).toString(16).padStart(40, "0").slice(-40)) as Address;
+    const buyToken = "0x0000000000000000000000000000000000000080" as Address;
     const recipient = "0x0000000000000000000000000000000000000090" as Address;
     const executionStore = new PostgresExecutionStore(pool, token);
     await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
