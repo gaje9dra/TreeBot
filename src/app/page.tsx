@@ -23,7 +23,7 @@ declare global {
 }
 
 const initialFeed: FeedEvent[] = [
-  { title: "Trading engine initialized", detail: "Paper mode only. Live order submission is hard-disabled in this build.", time: "SYSTEM", type: "good" },
+  { title: "TreeBot console initialized", detail: "The durable paper worker and ledger are not configured. Live execution and deposits remain disabled.", time: "SYSTEM", type: "warn" },
   { title: "Risk gates loaded", detail: "150 POL minimum · 2 POL gas reserve · 5 POL maximum simulated order.", time: "SYSTEM", type: "info" },
   { title: "Market data not configured", detail: "Add a trusted provider endpoint before evaluating live market opportunities.", time: "WAITING", type: "warn" }
 ];
@@ -39,7 +39,6 @@ function parseChainId(value: unknown): number {
 }
 
 export default function HomePage() {
-  const [stopped, setStopped] = useState(true);
   const [feed, setFeed] = useState(initialFeed);
   const [address, setAddress] = useState<Address>();
   const [chainId, setChainId] = useState<number>();
@@ -237,7 +236,7 @@ export default function HomePage() {
       <section className="hero">
         <div><div className="eyebrow">AUTONOMOUS STRATEGY · SAFETY FIRST</div><h1>Markets move.<br /><span style={{ color: "var(--mint)" }}>Stay in control.</span></h1><p className="lede">An explainable Polygon trading research console. Monitor wallet readiness, evaluate cost-aware signals, and test a strategy in a transparent paper environment before considering any real execution.</p></div>
         <div className="actions">
-          <button className={stopped ? "btn btn-primary" : "btn btn-danger"} onClick={() => { setStopped((value) => { const next = !value; logEvent(next ? "Paper engine stopped" : "Paper engine resumed", next ? "New simulated entries paused by user." : "Paper mode resumed; no real transactions can be submitted.", next ? "warn" : "good"); return next; }); }}><CircleStop size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 7 }} />{stopped ? "Resume paper engine" : "Stop engine"}</button>
+          <button className="btn" disabled title="The durable paper worker and ledger are not configured."><CircleStop size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 7 }} />Paper worker not configured</button>
           <button className="btn" onClick={() => { setFeed(initialFeed); logEvent("Activity view refreshed", "System notices restored; this is UI state, not a live exchange feed."); }}><Activity size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 7 }} />Refresh view</button>
         </div>
       </section>
@@ -247,7 +246,7 @@ export default function HomePage() {
       <div className="grid">
         <Metric icon={<Wallet size={14} />} label="WALLET BALANCE" value={balanceDisplay} meta={address ? (chainId === polygon.id ? "Read from connected wallet on Polygon PoS" : "Switch to Polygon to display eligible balance") : "Connect wallet to read native balance"} />
         <Metric icon={<ShieldCheck size={14} />} label="STARTING CAPITAL" value={capitalDisplay ? (capital!.eligible ? "ELIGIBLE" : "NOT READY") : "150 POL"} meta={capitalDisplay ? `Shortfall incl. gas reserve: ${capital!.shortfallPol.toFixed(4)} POL` : "150 POL minimum + 2 POL gas reserve"} tone={capitalDisplay && capital!.eligible ? "good" : "normal"} />
-        <Metric icon={<Gauge size={14} />} label="ENGINE STATUS" value={stopped ? "STOPPED" : "ARMED"} meta={stopped ? "User pause · no simulated entries" : "Paper mode only · no live execution"} tone={stopped ? "warn" : "good"} />
+        <Metric icon={<Gauge size={14} />} label="ENGINE STATUS" value="NOT RUNNING" meta="Durable paper worker and ledger are not configured" tone="warn" />
         <Metric icon={<Blocks size={14} />} label="NETWORK" value={chain.valid ? "POLYGON POS" : "NOT VERIFIED"} meta={`Expected chain ID 137 · detected ${chainId ?? "unknown"}`} tone={chain.valid ? "good" : "warn"} />
       </div>
 
