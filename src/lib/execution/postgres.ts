@@ -132,6 +132,7 @@ export class PostgresExecutionStore {
             AND a.revoked_at IS NULL AND a.expires_at>NOW()
             AND a.maximum_sell_amount>=execution_transactions.sell_amount
             AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) t WHERE LOWER(t)=LOWER(execution_transactions.sell_token))
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) t WHERE LOWER(t)=LOWER(execution_transactions.buy_token))
             AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_targets) t WHERE LOWER(t)=LOWER(execution_transactions.prepared_transaction->>'to'))
         )
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
