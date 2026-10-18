@@ -31,11 +31,11 @@ export class PolygonExecutionReadClient{
     return {chainId:137,from:sender,to,data,value,gasEstimate};
   }
   async erc20Allowance(token:string,owner:string,spender:string):Promise<bigint>{
-    await this.assertPolygon();if(![token,owner,spender].every(isAddress))throw new ChainValidationError("Invalid ERC-20 allowance address.");
+    await this.assertPolygon();if(![token,owner,spender].every((address) => isAddress(address)))throw new ChainValidationError("Invalid ERC-20 allowance address.");
     return this.publicClient.readContract({address:getAddress(token),abi:ERC20_ABI,functionName:"allowance",args:[getAddress(owner),getAddress(spender)]});
   }
   async getErc20Balance(token:string,owner:string):Promise<bigint>{
-    await this.assertPolygon();if(![token,owner].every(isAddress))throw new ChainValidationError("Invalid ERC-20 balance address.");
+    await this.assertPolygon();if(![token,owner].every((address) => isAddress(address)))throw new ChainValidationError("Invalid ERC-20 balance address.");
     return this.publicClient.readContract({address:getAddress(token),abi:ERC20_ABI,functionName:"balanceOf",args:[getAddress(owner)]});
   }
   async waitForSettlement(hash:Hash,confirmations=3,timeout=120_000):Promise<ReceiptSettlement>{
