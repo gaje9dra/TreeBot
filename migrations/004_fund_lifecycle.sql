@@ -1,5 +1,7 @@
 -- Phase 2.4B: durable chain watcher state and explicit fund lifecycle.
 -- Schema-only; does not enable deposits, withdrawals, or live transaction submission.
+-- IMPORTANT: ledger credit remains disabled until a trusted proof-bearing transaction boundary exists.
+-- The scanner's observations are not spendable funds and must never be treated as authorization.
 
 CREATE TABLE IF NOT EXISTS execution_chain_watcher_state (
   chain_id INTEGER NOT NULL CHECK (chain_id = 137),
