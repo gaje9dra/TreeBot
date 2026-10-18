@@ -49,7 +49,11 @@ describe("0x Polygon quote adapter", () => {
 
   it("rejects malformed output, amounts, calldata, and excessive slippage", async () => {
     await expect(adapter(async () => response(fixture({ buyAmount: "0" }))).getFirmQuote({ sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50 })).rejects.toThrow(QuoteValidationError);
-    await expect(adapter(async () => response(fixture({ transaction: { to: target, data: "not-hex", value: "0" } })).getFirmQuote({ sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50 })).rejects.toThrow(/calldata/);
+    await expect(
+      adapter(async () => response(fixture({ transaction: { to: target, data: "not-hex", value: "0" } }))).getFirmQuote({
+        sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50,
+      }),
+    ).rejects.toThrow(/calldata/);
     await expect(adapter().getFirmQuote({ sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 51 })).rejects.toThrow(/ceiling/);
   });
 
