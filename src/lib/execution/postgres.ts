@@ -25,6 +25,12 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
+      const restriction = await c.query(
+        `SELECT 1 FROM execution_account_restrictions
+         WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1`,
+        [input.walletAddress],
+      );
+      if (restriction.rowCount) throw new Error("Execution blocked because this account has an active financial-integrity restriction.");
       const inserted=await c.query(`INSERT INTO execution_transactions
         (id,idempotency_key,chain_id,wallet_address,sell_token,buy_token,side,sell_amount,quote,authorization_id,risk_checks,prepared_transaction,status)
         VALUES($1,$2,137,$3,$4,$5,'sell',$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,'prepared')
@@ -140,6 +146,11 @@ export class PostgresExecutionStore {
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal blocked by execution emergency stop.");
+      const restriction=await c.query(
+        "SELECT 1 FROM execution_account_restrictions WHERE account_id=$1 AND status='active' LIMIT 1",
+        [input.accountId],
+      );
+      if(restriction.rowCount)throw new Error("Withdrawal blocked by an active account financial-integrity restriction.");
       const duplicate=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
       if(duplicate.rowCount){await c.query("COMMIT");return {reserved:false};}
       const existing=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE id=$1 OR idempotency_key=$2",[input.id,input.idempotencyKey]);
@@ -408,11 +419,42 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           await client.query(
             "UPDATE execution_control SET emergency_stop=TRUE,mismatch_detected_at=NOW(),updated_at=NOW() WHERE id=1",
           );
+          const incidentKey = `deposit-reorg:137:${event.transactionHash.toLowerCase()}:${event.logIndex}`;
+          const evidence = {
+            watcherKey: input.watcherKey,
+            accountId: event.accountId,
+            assetAddress: event.assetAddress,
+            transactionHash: event.transactionHash,
+            logIndex: event.logIndex,
+            amountBaseUnits: event.amountBaseUnits,
+            blockNumber: event.blockNumber,
+            blockHash: event.blockHash,
+            reason: input.reason,
+          };
+          await client.query(
+            `INSERT INTO execution_financial_incidents
+              (incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,details)
+             VALUES($1,'deposit_reorg_after_credit',$2,LOWER($3),$4,137,$5,$6,$7::jsonb)
+             ON CONFLICT(incident_key) DO NOTHING`,
+            [incidentKey,event.accountId,event.assetAddress,event.amountBaseUnits,event.transactionHash.toLowerCase(),event.logIndex,JSON.stringify(evidence)],
+          );
+          await client.query(
+            `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,reason,evidence)
+             VALUES($1,$2,'deposit_reorg',$3,$4::jsonb)
+             ON CONFLICT(restriction_key) DO NOTHING`,
+            [event.accountId,`${incidentKey}:account`,"Credited deposit was orphaned; account frozen pending financial reconciliation.",JSON.stringify(evidence)],
+          );
+          // Also restrict the depositing sender wallet so a distinct account-ID mapping
+          // cannot bypass the restriction at execution-intent creation.
+          await client.query(
+            `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,reason,evidence)
+             VALUES(LOWER($1),$2,'deposit_reorg',$3,$4::jsonb)
+             ON CONFLICT(restriction_key) DO NOTHING`,
+            [event.senderAddress,`${incidentKey}:sender`,"Credited deposit was orphaned; sender wallet frozen pending financial reconciliation.",JSON.stringify(evidence)],
+          );
           await client.query(
             "INSERT INTO execution_audit_events(event_type,details) VALUES('orphaned_deposit_requires_reconciliation',$1::jsonb)",
-            [JSON.stringify({watcherKey:input.watcherKey,accountId:event.accountId,assetAddress:event.assetAddress,
-              transactionHash:event.transactionHash,logIndex:event.logIndex,amountBaseUnits:event.amountBaseUnits,
-              blockNumber:event.blockNumber,blockHash:event.blockHash,reason:input.reason})],
+            [JSON.stringify(evidence)],
           );
           exceptions++;
         } else {
