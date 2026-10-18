@@ -8,6 +8,10 @@ import type { Address, Hash } from "viem";
 export interface VerifiedDepositProof {
   readonly chainId: 137;
   readonly transactionHash: Hash;
+  readonly receiptTransactionHash: Hash;
+  readonly receiptStatus: "success";
+  readonly receiptBlockNumber: string;
+  readonly receiptBlockHash: Hash;
   readonly logIndex: number;
   readonly accountId: string;
   readonly tokenAddress: Address;
@@ -27,6 +31,13 @@ export function issueVerifiedDepositProof(input: VerifiedDepositProof): Verified
     proof.chainId !== 137 ||
     !/^0x[0-9a-fA-F]{64}$/.test(proof.transactionHash) ||
     !/^0x[0-9a-fA-F]{64}$/.test(proof.blockHash) ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.receiptTransactionHash) ||
+    proof.receiptStatus !== "success" ||
+    !/^(0|[1-9][0-9]*)$/.test(proof.receiptBlockNumber) ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.receiptBlockHash) ||
+    proof.receiptTransactionHash.toLowerCase() !== proof.transactionHash.toLowerCase() ||
+    proof.receiptBlockNumber !== proof.blockNumber ||
+    proof.receiptBlockHash.toLowerCase() !== proof.blockHash.toLowerCase() ||
     !Number.isSafeInteger(proof.logIndex) || proof.logIndex < 0 ||
     !proof.accountId.trim() ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.tokenAddress) ||
