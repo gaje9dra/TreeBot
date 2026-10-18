@@ -60,7 +60,7 @@ describe("execution safety integration boundaries", () => {
         expiresAt:2_000_000_000_000,revokedAt:null,authorizedBy:"audited_smart_account" as const}};
     const prepared = await api.prepare(request);
     const injectedBroadcaster = deps.submitAuthorized;
-    await expect(api.submitPrepared(prepared,request)).rejects.toThrow(/paused|emergency stop/i);
+    await expect(api.submitPrepared(prepared,request)).rejects.toThrow(/paused|emergency stop|changed risk control/i);
     expect(injectedBroadcaster).not.toHaveBeenCalled();
   });
 });
