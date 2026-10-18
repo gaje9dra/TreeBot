@@ -194,13 +194,16 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
+      const initial=await c.query("SELECT account_id,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[id]);
+      if(!initial.rows[0])throw new Error("Withdrawal reservation not found.");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initial.rows[0].account_id),String(initial.rows[0].asset_address).toLowerCase()]);
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",["treebot-account-restriction",String(initial.rows[0].account_id).toLowerCase()]);
       const q=await c.query("SELECT status,account_id,source_address,asset_address,transaction_hash,nonce,submission_started_at FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[id]);
       const row=q.rows[0];
       if(!row)throw new Error("Withdrawal reservation not found.");
-      if(row.status==="submitting"&&row.submission_started_at){await c.query("COMMIT");return;}
+      if(row.status==="submitting")throw new Error("Withdrawal submission outcome is ambiguous; reconcile it before any retry.");
       if(row.status!=="reserved"||row.transaction_hash||row.nonce!==null)throw new Error("Only an untouched reserved withdrawal can begin submission.");
       if(!row.source_address)throw new Error("Withdrawal submission requires a configured source address.");
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",["treebot-account-restriction",String(row.account_id).toLowerCase()]);
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal submission blocked by execution emergency stop.");
       const restriction=await c.query("SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",[row.account_id]);
@@ -267,6 +270,9 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
+      const initial=await c.query("SELECT account_id,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[proof.withdrawalId]);
+      if(!initial.rows[0])throw new Error("Withdrawal reservation not found.");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initial.rows[0].account_id),String(initial.rows[0].asset_address).toLowerCase()]);
       const q=await c.query("SELECT * FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[proof.withdrawalId]);
       const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
       if(["confirmed","reverted"].includes(String(row.status))){
@@ -284,7 +290,6 @@ export class PostgresExecutionStore {
         (row.transaction_hash&&String(row.transaction_hash).toLowerCase()!==proof.transactionHash.toLowerCase())){
         throw new Error("Settlement proof does not match the immutable withdrawal reservation.");
       }
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(row.account_id),String(row.asset_address).toLowerCase()]);
       const nextStatus=proof.status;
       const evidence=JSON.stringify({withdrawalId:proof.withdrawalId,chainId:proof.chainId,transactionHash:proof.transactionHash.toLowerCase(),
         status:proof.status,sourceAddress:proof.sourceAddress.toLowerCase(),tokenAddress:proof.tokenAddress.toLowerCase(),
