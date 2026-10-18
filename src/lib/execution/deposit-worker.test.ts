@@ -71,7 +71,7 @@ function fakeReader(input: { chainId?: number; head: bigint; hash?: Hash }): Dep
   return {
     getChainId: async () => input.chainId ?? 137,
     getBlockNumber: async () => input.head,
-    getBlock: async ({ blockNumber }) => ({ number: blockNumber, hash: blockHash, parentHash: blockHash }),
+    getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ number: blockNumber, hash: blockHash, parentHash: blockHash }),
     getLogs: async () => [],
     getTransactionReceipt: async () => { throw new Error("unused"); },
     getTransaction: async () => { throw new Error("unused"); },
