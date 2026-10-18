@@ -12,6 +12,17 @@ export interface ExecutionIntentInput {
   quote:Record<string,unknown>; authorizationId:string; riskChecks:Record<string,unknown>; preparedTransaction:Record<string,unknown>;
 }
 export interface StoredExecutionIntent extends ExecutionIntentInput { status:TransactionStatus; txHash:string|null; nonce:number|null; }
+export interface PortfolioAssetSnapshot {
+  assetAddress:string; ledgerBalance:string; inventoryQuantity:string; quantityMatchesLedger:boolean;
+  costBasisStatus:"complete"|"pending"|"reconciliation_required"; costBasisQuoteAsset:string|null; costBasisQuoteBaseUnits:string|null;
+  marketValueQuoteBaseUnits:string|null; unrealizedPnlQuoteBaseUnits:string|null; valuationSource:string|null; valuationObservedAt:string|null;
+}
+export interface PortfolioSnapshot {
+  accountId:string; quoteAssetAddress:string; assets:PortfolioAssetSnapshot[];
+  realizedPnlByQuoteAsset:Array<{quoteAssetAddress:string;realizedPnlBaseUnits:string}>;
+  pendingTradeAccountingCount:number; valuationComplete:boolean;
+  totalMarketValueQuoteBaseUnits:string|null; totalUnrealizedPnlQuoteBaseUnits:string|null;
+}
 function toRecord(row:Record<string,unknown>):StoredExecutionIntent{
   return {id:String(row.id),idempotencyKey:String(row.idempotency_key),walletAddress:String(row.wallet_address),
     sellToken:String(row.sell_token),buyToken:String(row.buy_token),sellAmount:String(row.sell_amount),
@@ -21,8 +32,14 @@ function toRecord(row:Record<string,unknown>):StoredExecutionIntent{
 }
 export class PostgresExecutionStore {
   private readonly accountingQuoteToken:string|null;
-  constructor(private readonly pool:Pool,accountingQuoteToken=process.env.TREEBOT_ACCOUNTING_QUOTE_TOKEN??""){
+  private readonly trustedValuationSources:Set<string>;
+  constructor(private readonly pool:Pool,accountingQuoteToken=process.env.TREEBOT_ACCOUNTING_QUOTE_TOKEN??"",
+    trustedValuationSourcesJson=process.env.TREEBOT_TRUSTED_VALUATION_SOURCES_JSON??"[]"){
     this.accountingQuoteToken=/^0x[0-9a-fA-F]{40}$/.test(accountingQuoteToken)?accountingQuoteToken.toLowerCase():null;
+    try{
+      const sources:unknown=JSON.parse(trustedValuationSourcesJson);
+      this.trustedValuationSources=new Set(Array.isArray(sources)?sources.filter((value):value is string=>typeof value==="string"&&value.trim().length>0).map((value)=>value.trim()):[]);
+    }catch{this.trustedValuationSources=new Set();}
   }
   async createOrGetIntent(input:ExecutionIntentInput):Promise<{record:StoredExecutionIntent;created:boolean}>{
     if(!input.id.trim()||!input.idempotencyKey.trim())throw new Error("Intent ID and idempotency key are required.");
@@ -704,6 +721,79 @@ export class PostgresExecutionStore {
     const row=r.rows[0];
     if(!row)return {status:"unknown",discrepancy:null,reconciledAt:null};
     return {status:row.status==="matched"?"matched":"mismatch",discrepancy:String(row.discrepancy),reconciledAt:String(row.reconciled_at)};
+  }
+
+  /**
+   * Returns exact ledger/inventory quantities. P&L is null unless both a complete quote-token cost basis
+   * and a fresh valuation from an explicitly trusted valuation source exist.
+   * Valuation price ratios are quote-token base units per asset base unit.
+   */
+  async getPortfolioSnapshot(accountId:string,quoteAssetAddress=this.accountingQuoteToken??""):Promise<PortfolioSnapshot>{
+    if(!accountId.trim()||!/^0x[0-9a-fA-F]{40}$/.test(quoteAssetAddress))throw new Error("A valid account and canonical quote token are required for portfolio accounting.");
+    const quote=quoteAssetAddress.toLowerCase();
+    const [ledgerRows,inventoryRows,pnlRows,pendingRows]=await Promise.all([
+      this.pool.query("SELECT LOWER(asset_address) AS asset,COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND entry_type <> 'realized_pnl' AND LOWER(asset_address)<>'0x0000000000000000000000000000000000000000' GROUP BY LOWER(asset_address)",[accountId]),
+      this.pool.query("SELECT LOWER(asset_address) AS asset,quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND LOWER(account_id)=LOWER($1)",[accountId]),
+      this.pool.query("SELECT LOWER(quote_asset_address) AS quote_asset,SUM(realized_pnl_quote_base_units)::text AS pnl FROM execution_trade_accounting WHERE LOWER(account_id)=LOWER($1) AND accounting_status='complete' AND realized_pnl_quote_base_units IS NOT NULL AND quote_asset_address IS NOT NULL GROUP BY LOWER(quote_asset_address)",[accountId]),
+      this.pool.query("SELECT COUNT(*)::text AS count FROM execution_trade_accounting WHERE LOWER(account_id)=LOWER($1) AND accounting_status IN('pending','reconciliation_required')",[accountId]),
+    ]);
+    const ledger=new Map<string,string>(ledgerRows.rows.map((row)=>[String(row.asset),String(row.quantity)]));
+    const inventory=new Map<string,string>(inventoryRows.rows.map((row)=>[String(row.asset),String(row.quantity)]));
+    const assets=[...new Set([...ledger.keys(),...inventory.keys()])].sort();
+    const snapshots:PortfolioAssetSnapshot[]=[];
+    for(const asset of assets){
+      const ledgerBalance=ledger.get(asset)??"0";
+      const inventoryQuantity=inventory.get(asset)??"0";
+      const quantityMatchesLedger=BigInt(ledgerBalance)===BigInt(inventoryQuantity);
+      let costBasisStatus:PortfolioAssetSnapshot["costBasisStatus"]="pending";
+      let costBasisQuoteAsset:string|null=null;
+      let costBasisQuoteBaseUnits:string|null=null;
+      if(asset===quote){
+        costBasisStatus="complete";costBasisQuoteAsset=quote;costBasisQuoteBaseUnits=inventoryQuantity;
+      }else{
+        const basis=await this.pool.query(
+          "SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)",
+          [accountId,asset,quote],
+        );
+        const row=basis.rows[0];
+        if(row?.cost_basis_status==="reconciliation_required")costBasisStatus="reconciliation_required";
+        else if(row?.cost_basis_status==="complete"&&BigInt(String(row.quantity))===BigInt(inventoryQuantity)){
+          costBasisStatus="complete";costBasisQuoteAsset=quote;costBasisQuoteBaseUnits=String(row.cost_basis);
+        }
+      }
+      let marketValueQuoteBaseUnits:string|null=null,unrealizedPnlQuoteBaseUnits:string|null=null;
+      let valuationSource:string|null=null,valuationObservedAt:string|null=null;
+      if(asset===quote){
+        marketValueQuoteBaseUnits=inventoryQuantity;valuationSource="quote-token-par";valuationObservedAt=new Date().toISOString();
+      }else if(this.trustedValuationSources.size){
+        const valuation=await this.pool.query(
+          "SELECT valuation_source,price_numerator::text AS numerator,price_denominator::text AS denominator,observed_at::text AS observed_at FROM execution_asset_valuations WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) AND freshness_deadline>NOW() AND valuation_source=ANY($4::text[]) ORDER BY observed_at DESC LIMIT 1",
+          [accountId,asset,quote,[...this.trustedValuationSources]],
+        );
+        if(valuation.rows[0]){
+          const row=valuation.rows[0];
+          const numerator=BigInt(String(row.numerator)),denominator=BigInt(String(row.denominator));
+          if(denominator>0n){
+            marketValueQuoteBaseUnits=((BigInt(inventoryQuantity)*numerator)/denominator).toString();
+            valuationSource=String(row.valuation_source);valuationObservedAt=String(row.observed_at);
+          }
+        }
+      }
+      if(quantityMatchesLedger&&costBasisStatus==="complete"&&marketValueQuoteBaseUnits!==null&&costBasisQuoteBaseUnits!==null){
+        unrealizedPnlQuoteBaseUnits=(BigInt(marketValueQuoteBaseUnits)-BigInt(costBasisQuoteBaseUnits)).toString();
+      }
+      snapshots.push({assetAddress:asset,ledgerBalance,inventoryQuantity,quantityMatchesLedger,costBasisStatus,costBasisQuoteAsset,costBasisQuoteBaseUnits,
+        marketValueQuoteBaseUnits,unrealizedPnlQuoteBaseUnits,valuationSource,valuationObservedAt});
+    }
+    const valuationComplete=snapshots.every((asset)=>asset.quantityMatchesLedger&&asset.marketValueQuoteBaseUnits!==null&&asset.unrealizedPnlQuoteBaseUnits!==null);
+    const totalMarketValueQuoteBaseUnits=valuationComplete?snapshots.reduce((sum,asset)=>sum+BigInt(asset.marketValueQuoteBaseUnits!),0n).toString():null;
+    const totalUnrealizedPnlQuoteBaseUnits=valuationComplete?snapshots.reduce((sum,asset)=>sum+BigInt(asset.unrealizedPnlQuoteBaseUnits!),0n).toString():null;
+    return {
+      accountId,quoteAssetAddress:quote,assets:snapshots,
+      realizedPnlByQuoteAsset:pnlRows.rows.map((row)=>({quoteAssetAddress:String(row.quote_asset),realizedPnlBaseUnits:String(row.pnl)})),
+      pendingTradeAccountingCount:Number(pendingRows.rows[0]?.count??0),valuationComplete,
+      totalMarketValueQuoteBaseUnits,totalUnrealizedPnlQuoteBaseUnits,
+    };
   }
 
   async isEmergencyStopActive():Promise<boolean>{
