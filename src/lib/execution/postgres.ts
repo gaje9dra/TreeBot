@@ -159,47 +159,54 @@ export class PostgresExecutionStore {
       [id,JSON.stringify({message:m,retryAllowed:false})]);
   }
   async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
-    assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
-    assertNonNegativeBaseUnits(input.gasWei,"gas");
-    if(input.realizedPnlBaseUnits!==undefined&&!/^-?(0|[1-9][0-9]*)$/.test(input.realizedPnlBaseUnits))throw new Error("Invalid realized P&L base-unit value.");
+    assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");
+    assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
+    assertNonNegativeBaseUnits(input.gasWei,"gas amount");
+    if(input.realizedPnlBaseUnits!==undefined&&!/^-?(0|[1-9][0-9]*)$/.test(input.realizedPnlBaseUnits))throw new Error("Invalid realized P&L amount.");
     if(input.quoteFeeBaseUnits!==undefined)assertNonNegativeBaseUnits(input.quoteFeeBaseUnits,"quote fee");
-    if(!/^[1-9][0-9]*$/.test(input.blockNumber))throw new Error("Invalid settlement block number.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      const u=await c.query(`UPDATE execution_transactions SET status=$2,confirmation_block=$3,actual_sell_amount=$4,actual_buy_amount=$5,actual_gas_wei=$6,
-        confirmed_at=CASE WHEN $2='confirmed' THEN NOW() ELSE NULL END,updated_at=NOW()
-        WHERE id=$1 AND status IN ('submitted','pending','unknown','replaced') RETURNING id`,
+      const initial=await c.query("SELECT wallet_address,sell_token,buy_token,sell_amount,tx_hash FROM execution_transactions WHERE id=$1",[input.id]);
+      const initialRow=initial.rows[0];
+      if(!initialRow?.tx_hash)throw new Error("Settlement requires a recorded transaction hash.");
+      if(input.status==="confirmed"&&BigInt(input.actualSellAmount)!==BigInt(initialRow.sell_amount))throw new Error("Confirmed trade sell amount must match the reserved exact-input amount.");
+      if(input.status==="reverted"&&(input.actualSellAmount!=="0"||input.actualBuyAmount!=="0"))throw new Error("Reverted trade settlement cannot move token principal.");
+      const assets=[String(initialRow.sell_token).toLowerCase(),String(initialRow.buy_token).toLowerCase()].sort();
+      for(const asset of assets)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initialRow.wallet_address).toLowerCase(),asset]);
+      const u=await c.query("UPDATE execution_transactions SET status=$2,confirmation_block=$3,actual_sell_amount=$4,actual_buy_amount=$5,actual_gas_wei=$6,execution_price=CASE WHEN $4::numeric>0 THEN $5::numeric/$4::numeric ELSE NULL END,confirmed_at=CASE WHEN $2='confirmed' THEN NOW() ELSE confirmed_at END,updated_at=NOW() WHERE id=$1 AND status IN('submitted','pending','unknown','replaced')",
         [input.id,input.status,input.blockNumber,input.actualSellAmount,input.actualBuyAmount,input.gasWei]);
-      if(u.rowCount!==1)throw new Error("Transaction is not eligible for settlement reconciliation.");
-      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'settlement_reconciled',$2::jsonb)",[input.id,JSON.stringify(input)]);
+      if(u.rowCount!==1)throw new Error("Execution intent is not eligible for settlement.");
+      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,$2,$3::jsonb)",
+        [input.id,input.status,JSON.stringify({blockNumber:input.blockNumber,actualSellAmount:input.actualSellAmount,actualBuyAmount:input.actualBuyAmount,gasWei:input.gasWei})]);
+      const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[input.id]);
+      const row=q.rows[0];if(!row?.tx_hash)throw new Error("Settlement transaction hash missing.");
+      const txHash=String(row.tx_hash);
       if(input.status==="confirmed"){
-        const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[input.id]);
-        const row=q.rows[0];if(!row?.tx_hash)throw new Error("Confirmed settlement requires transaction hash.");
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'trade_sell',$3,-$4::numeric,137,$5,$6::jsonb),($1,$7,'trade_buy',$8,$9,137,$5,$6::jsonb),($1,$10,'gas','0x0000000000000000000000000000000000000000',-$11::numeric,137,$5,$6::jsonb)
-          ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,`${row.tx_hash}:sell`,row.sell_token,input.actualSellAmount,row.tx_hash,JSON.stringify({executionId:input.id}),
-            `${row.tx_hash}:buy`,row.buy_token,input.actualBuyAmount,`${row.tx_hash}:gas`,input.gasWei]);
-        if(input.realizedPnlBaseUnits!==undefined&&input.realizedPnlBaseUnits!=="0"){
-          await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-            VALUES($1,$2,'realized_pnl',$3,$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-            [row.wallet_address,`${row.tx_hash}:realized-pnl`,row.buy_token,input.realizedPnlBaseUnits,row.tx_hash,JSON.stringify({executionId:input.id})]);
-        }
-        if(input.quoteFeeBaseUnits!==undefined&&input.quoteFeeBaseUnits!=="0"){
-          await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-            VALUES($1,$2,'fee',$3,-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-            [row.wallet_address,`${row.tx_hash}:fee`,row.buy_token,input.quoteFeeBaseUnits,row.tx_hash,JSON.stringify({executionId:input.id})]);
-        }
+          VALUES($1,$2,'trade_sell',LOWER($3),-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":sell",row.sell_token,input.actualSellAmount,txHash,JSON.stringify({executionId:input.id})]);
+        await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'trade_buy',LOWER($3),$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":buy",row.buy_token,input.actualBuyAmount,txHash,JSON.stringify({executionId:input.id})]);
+        if(BigInt(input.gasWei)>0n)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":gas",input.gasWei,txHash,JSON.stringify({executionId:input.id})]);
+        if(input.quoteFeeBaseUnits&&BigInt(input.quoteFeeBaseUnits)>0n)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'fee',LOWER($3),-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":fee",row.buy_token,input.quoteFeeBaseUnits,txHash,JSON.stringify({executionId:input.id})]);
+        if(input.realizedPnlBaseUnits&&input.realizedPnlBaseUnits!=="0")await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'realized_pnl',LOWER($3),$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":pnl",row.buy_token,input.realizedPnlBaseUnits,txHash,JSON.stringify({executionId:input.id})]);
+      }else if(BigInt(input.gasWei)>0n){
+        await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [row.wallet_address,txHash+":gas",input.gasWei,txHash,JSON.stringify({executionId:input.id,reverted:true})]);
       }
       await c.query("COMMIT");
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
-  /**
-   * Direct caller-supplied deposit records are never sufficient proof of funds.
-   * This remains disabled even when the scanner has observed a matching event:
-   * only a separately designed proof-bearing credit API may write spendable funds.
-   */
+
   async recordDepositEvent(_input: {
     accountId: string;
     token: string;
