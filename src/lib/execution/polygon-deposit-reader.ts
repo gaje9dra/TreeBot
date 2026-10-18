@@ -96,6 +96,7 @@ export class ViemPolygonDepositReader implements DepositRangeReader {
       transactionHash: r.transactionHash,
       status: r.status === "success" ? "success" as const : "reverted" as const,
       blockNumber: r.blockNumber,
+      blockHash: r.blockHash,
       logs: r.logs.map((log) => ({ address: getAddress(log.address), data: log.data, topics: log.topics, logIndex: log.logIndex })),
     };
   }
