@@ -59,7 +59,7 @@ export class PostgresExecutionStore {
       if(idCollision.rowCount)throw new Error("Execution intent ID already belongs to another reservation.");
 
       const authorization=await c.query(
-        "SELECT owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount::text,expires_at,revoked_at FROM execution_authorizations WHERE id=$1 FOR SHARE",
+        "SELECT owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount::text AS maximum_sell_amount,expires_at,revoked_at FROM execution_authorizations WHERE id=$1 FOR SHARE",
         [input.authorizationId],
       );
       const auth=authorization.rows[0];
