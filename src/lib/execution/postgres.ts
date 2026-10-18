@@ -129,11 +129,19 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      // Serialize all reservations for a given account/asset, including the empty-ledger case.
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
       const duplicate=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
       if(duplicate.rowCount){await c.query("COMMIT");return {reserved:false};}
-      const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND asset_address=$2",[input.accountId,input.token]);
-      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE account_id=$1 AND asset_address=$2 AND status IN('reserved','submitted','unknown')",[input.accountId,input.token]);
-      const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0");if(amount>available)throw new Error("Withdrawal exceeds withdrawable ledger balance.");
+      const existing=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE id=$1 OR idempotency_key=$2",[input.id,input.idempotencyKey]);
+      if(existing.rowCount)throw new Error("Withdrawal ID or idempotency key already belongs to another reservation.");
+      // These are journal primitives only. Reject withdrawal while the last reconciliation is
+      // missing or mismatched; callers must reconcile on-chain balance before reserving funds.
+      const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.accountId,input.token]);
+      if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
+      const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
+      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitted','unknown')",[input.accountId,input.token]);
+      const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds withdrawable ledger balance.");
       await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,asset_address,recipient_address,amount_base_units,status,idempotency_key)
         VALUES($1,$2,$3,$4,$5,'reserved',$6)`,[input.id,input.accountId,input.token,input.recipient,input.amount,input.idempotencyKey]);
       await c.query("COMMIT");return {reserved:true};
