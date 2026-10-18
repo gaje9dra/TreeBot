@@ -149,7 +149,8 @@ export class PostgresExecutionStore {
     if(!input.accountId.trim()||!input.idempotencyKey.trim()||!input.id.trim())throw new Error("Withdrawal reservation identity is required.");
     const c=await this.pool.connect();
     try{
-      await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await c.query("BEGIN");
+      // READ COMMITTED plus the account/asset advisory lock gives each serialized reservation a fresh balance snapshot.
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.accountId.toLowerCase()]);
       const duplicate=await c.query(
