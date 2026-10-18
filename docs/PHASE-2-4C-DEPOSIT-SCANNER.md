@@ -2,38 +2,27 @@
 
 ## Scope and safety
 
-The Polygon deposit scanner is an orchestration boundary, not a production-enabled credit path by itself. Live deposit credit remains disabled until a PostgreSQL-backed implementation of `DepositScannerStore` is wired into the application and reviewed. Existing `PostgresExecutionStore.recordDepositEvent()` intentionally fails closed and must not be replaced by a caller-trusting credit operation.
+The scanner records observed Polygon ERC-20 transfers and durable lifecycle state. It does **not** create spendable credits. PostgresExecutionStore.recordDepositEvent() intentionally fails closed, and the scanner's PostgreSQL store returns credited: 0 for every range. Deposits, withdrawals, and live trading must remain disabled.
 
-## Required deployment wiring
+## Implemented and verified
 
-A deployment must provide:
+- Polygon RPC reader scans bounded Transfer log ranges for configured token contracts and vault recipient.
+- Scanner matches each candidate to the exact receipt log index, token address, Transfer topic, sender topic, recipient topic, amount data, transaction hash, receipt block number, and receipt block hash.
+- The trusted transaction watcher also verifies that the receipt block hash matches the current canonical block.
+- PostgreSQL scanner observations and checkpoint advancement share a serializable transaction with checkpoint compare-and-swap and unique (chain_id, transaction_hash, log_index) event identity.
+- Reorg lifecycle changes and checkpoint rewind share one serializable transaction. Uncredited orphan observations are marked reversed. If an orphan is already linked to a ledger credit, the store marks it reconciliation_required, writes an audit event, enables the emergency stop, and does **not** issue an aggregate-balance-based debit.
+- GitHub Actions starts a disposable PostgreSQL 16 service, applies migrations 001–005, and runs PostgreSQL integration tests for persistence/no-credit behavior, concurrent checkpoint commits, atomic reorg rewind, credited-orphan fail-closed behavior, and transaction rollback.
 
-- A Polygon RPC implementation of `DepositRangeReader` that performs bounded `eth_getLogs` calls over the configured token contracts and vault recipient topic.
-- A verified account-mapping source. The `accountForSender` callback must resolve an independently authenticated wallet/account binding; do not assume any arbitrary sender is enrolled.
-- A PostgreSQL implementation of `DepositScannerStore` using `execution_chain_watcher_state`, `execution_deposit_lifecycle`, and `execution_ledger_entries`.
-- A service process or scheduler with single-writer leases / compare-and-swap checkpoint updates.
-- A finality policy suitable for the configured RPC and production risk model.
+## Still blocked — do not enable financial operations
 
-## Atomic store requirements
+1. **Trusted durable credit path:** recordDepositEvent() is still disabled. A successful receipt observation is not yet a spendable balance credit.
+2. **Allocation-aware recovery:** the system does not yet maintain source-lot provenance through reservations, withdrawals, trades, fees, and cross-asset proceeds. A credited orphan therefore freezes for explicit reconciliation rather than being automatically reversed. Do not replace this with an aggregate-balance check.
+3. **Runtime wiring:** the scanner is not wired to a production worker/scheduler with authenticated account mapping, deployment-configured token/vault allowlists, single-writer coordination, and operational alerting.
+4. **Operational recovery proof:** CI exercises database transactions, concurrency, and restart-safe state changes, but it does not establish a production RPC's reorg characteristics or validate live account mappings.
 
-`commitScannedRange` must run in one database transaction:
+## Requirements before completion
 
-1. Lock or compare-and-swap the row for `(chain_id, watcher_key)` and verify `expectedNextBlock`.
-2. Verify observations are within the requested range and use valid configured tokens and vault address.
-3. Upsert each event using `(chain_id, transaction_hash, log_index)` identity and reject conflicting immutable fields.
-4. Record confirmed lifecycle state only after required finality and canonical block checks.
-5. Insert ledger credit with a unique deterministic event key in the same transaction as lifecycle state.
-6. Advance the checkpoint only after every observation is durably recorded.
-7. Roll back lifecycle changes, credits, and checkpoint together on any error.
-
-A duplicate event may be recognized without a second credit. Never delete financial journal history.
-
-## Reorganization policy
-
-Before crediting, use the configured confirmation/finality threshold and verify the block hash is canonical. On detected reorganization, stop advancing the affected checkpoint, re-read the affected canonical block range, and create compensating ledger entries for orphaned credits. If funds have already been allocated elsewhere, do not create a hidden negative balance: freeze affected spending and record `reconciliation_required` for operator resolution. Persist and test checkpoint rewind/replay behavior before enabling the scanner in production.
-
-## Current limitation
-
-The scanner module defines the typed scanning orchestration and a store contract. It is not yet a complete production integration: a concrete PostgreSQL `DepositScannerStore`, a configured Polygon reader, runtime worker wiring, full reorganization rewind/replay, and actual PostgreSQL integration tests are still required. The module and unit test do not prove real chain access or real deposits.
-
-Keep deposits, withdrawals, and live trading disabled until all Phase 2 custody, accounting, and security gates are independently verified.
+- Define and test per-deposit allocation/provenance across every ledger use before any automatic compensating debit is allowed.
+- Implement a trusted server-side credit boundary that persists verified receipt block hash, exact log identity, finality evidence, and an idempotent ledger entry in one PostgreSQL transaction.
+- Wire the scanner to a controlled runtime only after configuration and account mapping are independently authenticated.
+- Keep deposits, withdrawals, and live trading disabled until the remaining gates are implemented, independently reviewed, and verified on the exact final commit.

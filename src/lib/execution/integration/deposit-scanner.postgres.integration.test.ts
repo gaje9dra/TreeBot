@@ -68,6 +68,34 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     expect(lifecycle.rows[0]).toMatchObject({ status: "confirmed", credited_event_key: null, watcher_key: watcherKey });
   });
 
+  it("rolls back earlier observations and checkpoint advancement if a later event is invalid", async () => {
+    const watcherKey = `${prefix}-rollback`;
+    await store.getOrCreateCheckpoint({ chainId: 137, watcherKey, initialBlock: 100n });
+    await expect(store.commitScannedRange({
+      chainId: 137,
+      watcherKey,
+      expectedNextBlock: 100n,
+      nextBlock: 101n,
+      lastScannedBlockHash: hash(100),
+      observations: [
+        {
+          chainId: 137, transactionHash: hash(111), logIndex: 0, accountId: `${prefix}-account-111`,
+          assetAddress: token, senderAddress: sender, vaultAddress: vault, amountBaseUnits: "1000",
+          blockNumber: "100", blockHash: hash(100), confirmations: 64, requiredConfirmations: 64,
+        },
+        {
+          chainId: 137, transactionHash: hash(112), logIndex: 0, accountId: `${prefix}-account-112`,
+          assetAddress: token, senderAddress: sender, vaultAddress: vault, amountBaseUnits: "0",
+          blockNumber: "100", blockHash: hash(100), confirmations: 64, requiredConfirmations: 64,
+        },
+      ],
+    })).rejects.toThrow(/positive/);
+    const state = await pool.query("SELECT next_block::text FROM execution_chain_watcher_state WHERE chain_id=137 AND watcher_key=$1", [watcherKey]);
+    const events = await pool.query("SELECT transaction_hash FROM execution_deposit_lifecycle WHERE chain_id=137 AND watcher_key=$1", [watcherKey]);
+    expect(state.rows[0].next_block).toBe("100");
+    expect(events.rows).toHaveLength(0);
+  });
+
   it("allows only one concurrent range commit for a checkpoint", async () => {
     const watcherKey = `${prefix}-race`;
     await store.getOrCreateCheckpoint({ chainId: 137, watcherKey, initialBlock: 500n });
