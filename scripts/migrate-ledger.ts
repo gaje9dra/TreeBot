@@ -1,5 +1,8 @@
+import { loadEnvConfig } from "next/env";
 import { readFileSync } from "node:fs";
 import { createLedgerPool } from "../src/lib/ledger/postgres";
+
+loadEnvConfig(process.cwd());
 
 async function main(): Promise<void> {
   const pool = createLedgerPool();
