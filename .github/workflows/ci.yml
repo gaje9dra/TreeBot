@@ -26,7 +26,7 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Verify formatting (do not rewrite the checkout)
+      - name: Verify formatting (read-only)
         run: npm run format:check
       - name: Lint
         run: npm run lint
@@ -34,6 +34,15 @@ jobs:
         run: npm run typecheck
       - name: Unit and boundary tests
         run: npm test
+      - name: Polygon RPC integration tests (explicitly gated; test RPC only)
+        run: npm run test:integration
+        env:
+          TREEBOT_RUN_CHAIN_INTEGRATION: ${{ secrets.TREEBOT_RUN_CHAIN_INTEGRATION }}
+          TREEBOT_INTEGRATION_RPC_URL: ${{ secrets.TREEBOT_INTEGRATION_RPC_URL }}
+          TREEBOT_TEST_WALLET_ADDRESS: ${{ secrets.TREEBOT_TEST_WALLET_ADDRESS }}
+          TREEBOT_TEST_SELL_TOKEN: ${{ secrets.TREEBOT_TEST_SELL_TOKEN }}
+          TREEBOT_TEST_BUY_TOKEN: ${{ secrets.TREEBOT_TEST_BUY_TOKEN }}
+          TREEBOT_TEST_TARGET: ${{ secrets.TREEBOT_TEST_TARGET }}
       - name: Production build
         run: npm run build
         env:
