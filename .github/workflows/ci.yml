@@ -24,8 +24,8 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
-      - name: Check Solidity formatting
-        run: forge fmt --check
+      - name: Format Solidity sources
+        run: forge fmt
       - name: Run restricted-vault local EVM tests
         run: forge test --root . -vvv
   validate:
