@@ -56,13 +56,12 @@ export interface DepositLifecycleRecord extends ScannedDepositLog {
 }
 
 export interface DepositScannerStore {
-  /** Create the initial cursor if absent and return the next block to scan. */
   getOrCreateCheckpoint(input: {
     chainId: 137;
     watcherKey: string;
     initialBlock: bigint;
   }): Promise<{ nextBlock: bigint; lastScannedBlockHash: Hash | null }>;
-  /** Atomically upsert observations, apply safe credit/reversal transitions, and advance checkpoint. */
+  /** One serializable PostgreSQL transaction; compare-and-swap nextBlock before all writes. */
   commitScannedRange(input: {
     chainId: 137;
     watcherKey: string;
@@ -76,13 +75,21 @@ export interface DepositScannerStore {
     watcherKey: string;
     fromBlock: bigint;
   }): Promise<readonly DepositLifecycleRecord[]>;
-  /** Apply auditable compensating entries; never deletes ledger history. */
+  /** Records compensating entries; never deletes financial journal history. */
   reconcileOrphanedDeposits(input: {
     chainId: 137;
     watcherKey: string;
     orphaned: readonly DepositLifecycleRecord[];
     reason: string;
   }): Promise<{ reversed: number; exceptions: number }>;
+  /** Rewind only after the same transaction has recorded all required reversals/exceptions. */
+  rewindCheckpoint(input: {
+    chainId: 137;
+    watcherKey: string;
+    expectedNextBlock: bigint;
+    nextBlock: bigint;
+    lastScannedBlockHash: Hash | null;
+  }): Promise<void>;
 }
 
 export interface DepositScannerConfig {
@@ -103,9 +110,9 @@ export class DepositScannerError extends Error {
 }
 
 /**
- * Durable scanner orchestration. The store must implement each commit under one
- * PostgreSQL transaction and enforce (chain_id, tx_hash, log_index) uniqueness.
- * Credits are not spendable before finality, and a reorg never deletes journal history.
+ * Durable scanning orchestration. A production store must use PostgreSQL transactions,
+ * CAS checkpoints, unique event keys, and idempotent ledger entries. This class alone
+ * does not enable spendable credits.
  */
 export class PolygonDepositScanner {
   constructor(
@@ -140,7 +147,6 @@ export class PolygonDepositScanner {
     const toBlock = finalizedHead < fromBlock + BigInt(this.config.maxBlockRange) - 1n
       ? finalizedHead : fromBlock + BigInt(this.config.maxBlockRange) - 1n;
 
-    // Detect a fork at the previously stored boundary before processing the next range.
     if (checkpoint.lastScannedBlockHash && fromBlock > 0n) {
       const previous = await this.chain.getBlock({ blockNumber: fromBlock - 1n });
       if (previous.hash.toLowerCase() !== checkpoint.lastScannedBlockHash.toLowerCase()) {
@@ -156,9 +162,19 @@ export class PolygonDepositScanner {
           orphaned,
           reason: "Canonical block hash changed during deposit scanner checkpoint reconciliation.",
         });
-        // Rewind one block after recording reversals. The store must CAS the old cursor,
-        // otherwise concurrent workers could silently overwrite one another.
-        throw new DepositScannerError("Chain reorganization detected; reversals recorded where possible. Operator/store must rewind checkpoint to canonical boundary before rescanning.");
+        const rewindTo = orphaned.length ? orphaned.reduce((n, record) => {
+          const block = BigInt(record.blockNumber);
+          return block < n ? block : n;
+        }, fromBlock - 1n) : fromBlock - 1n;
+        const newPriorBlock = rewindTo > 0n ? await this.chain.getBlock({ blockNumber: rewindTo - 1n }) : null;
+        await this.store.rewindCheckpoint({
+          chainId: 137,
+          watcherKey: this.config.watcherKey,
+          expectedNextBlock: fromBlock,
+          nextBlock: rewindTo,
+          lastScannedBlockHash: newPriorBlock?.hash ?? null,
+        });
+        throw new DepositScannerError("Chain reorganization reconciled; scanner checkpoint rewound. Retry scanning from the canonical checkpoint.");
       }
     }
 
@@ -175,9 +191,18 @@ export class PolygonDepositScanner {
     for (const log of logs) {
       if (!tokens.includes(log.tokenAddress.toLowerCase())) continue;
       if (log.recipientAddress.toLowerCase() !== vault || log.amount <= 0n) continue;
+      if (log.blockNumber < fromBlock || log.blockNumber > toBlock) {
+        throw new DepositScannerError("RPC returned a log outside the requested block range.");
+      }
       const block = await this.chain.getBlock({ blockNumber: log.blockNumber });
       if (block.hash.toLowerCase() !== log.blockHash.toLowerCase()) {
         throw new DepositScannerError("Observed log block hash is not canonical; range checkpoint was not advanced.");
+      }
+      // Check both the event block and current head-derived finality before a credit can be considered.
+      const receipt = await this.chain.getTransactionReceipt({ hash: log.transactionHash });
+      if (receipt.transactionHash.toLowerCase() !== log.transactionHash.toLowerCase() || receipt.status !== "success" ||
+          receipt.blockNumber !== log.blockNumber) {
+        throw new DepositScannerError("Deposit candidate receipt identity, status, or block does not match the event.");
       }
       const accountId = await this.config.accountForSender(log.senderAddress);
       if (!accountId) continue;
@@ -211,7 +236,6 @@ export class PolygonDepositScanner {
   }
 }
 
-/** Adapter used by a configured RPC implementation to normalize receipt status. */
 export function assertSuccessfulDepositReceipt(receipt: DepositReceipt): void {
   if (receipt.status !== "success" || receipt.blockNumber === null) {
     throw new DepositScannerError("Deposit candidate has no successful mined receipt.");
