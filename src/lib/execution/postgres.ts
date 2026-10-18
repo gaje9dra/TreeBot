@@ -4,6 +4,7 @@ import type { DepositLifecycleRecord, DepositScannerStore } from "./deposit-scan
 import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
 import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
+import { isIssuedWithdrawalSettlement, type VerifiedWithdrawalSettlement } from "./withdrawal-verifier";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
@@ -142,39 +143,178 @@ export class PostgresExecutionStore {
     throw new Error("Deposit credit is disabled until trusted durable chain-proof verification is configured.");
   }
   /** Serialize reserve operations so concurrent withdrawals cannot overspend the same ledger balance. */
-  async reserveWithdrawal(input:{id:string;accountId:string;token:string;recipient:string;amount:string;idempotencyKey:string}):Promise<{reserved:boolean}>{
+  async reserveWithdrawal(input:{id:string;accountId:string;sourceAddress:string;token:string;recipient:string;amount:string;idempotencyKey:string}):Promise<{reserved:boolean}>{
     const amount=assertPositiveBaseUnits(input.amount,"withdrawal amount");
-    if(!/^0x[0-9a-fA-F]{40}$/.test(input.token)||!/^0x[0-9a-fA-F]{40}$/.test(input.recipient))throw new Error("Invalid withdrawal token or recipient address.");
+    if(!/^0x[0-9a-fA-F]{40}$/.test(input.sourceAddress)||!/^0x[0-9a-fA-F]{40}$/.test(input.token)||!/^0x[0-9a-fA-F]{40}$/.test(input.recipient))throw new Error("Invalid withdrawal source, token, or recipient address.");
     if(!input.accountId.trim()||!input.idempotencyKey.trim()||!input.id.trim())throw new Error("Withdrawal reservation identity is required.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-      // Serialize all reservations for a given account/asset, including the empty-ledger case.
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.accountId.toLowerCase()]);
+      const duplicate=await c.query(
+        "SELECT id,account_id,source_address,asset_address,recipient_address,amount_base_units::text FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",
+        [input.idempotencyKey],
+      );
+      if(duplicate.rowCount){
+        const row=duplicate.rows[0];
+        const same=row.id===input.id&&row.account_id===input.accountId&&String(row.source_address??"").toLowerCase()===input.sourceAddress.toLowerCase()&&
+          String(row.asset_address).toLowerCase()===input.token.toLowerCase()&&String(row.recipient_address).toLowerCase()===input.recipient.toLowerCase()&&
+          String(row.amount_base_units)===amount.toString();
+        if(!same)throw new Error("Withdrawal idempotency key was reused with different immutable parameters.");
+        await c.query("COMMIT");return {reserved:false};
+      }
+      const existing=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE id=$1 OR idempotency_key=$2",[input.id,input.idempotencyKey]);
+      if(existing.rowCount)throw new Error("Withdrawal ID or idempotency key already belongs to another reservation.");
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal blocked by execution emergency stop.");
       const restriction=await c.query(
-        "SELECT 1 FROM execution_account_restrictions WHERE account_id=$1 AND status='active' LIMIT 1",
+        "SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",
         [input.accountId],
       );
       if(restriction.rowCount)throw new Error("Withdrawal blocked by an active account financial-integrity restriction.");
-      const duplicate=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
-      if(duplicate.rowCount){await c.query("COMMIT");return {reserved:false};}
-      const existing=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE id=$1 OR idempotency_key=$2",[input.id,input.idempotencyKey]);
-      if(existing.rowCount)throw new Error("Withdrawal ID or idempotency key already belongs to another reservation.");
-      // These are journal primitives only. Reject withdrawal while the last reconciliation is
-      // missing or mismatched; callers must reconcile on-chain balance before reserving funds.
-      const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.accountId,input.token]);
+      const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.sourceAddress,input.token]);
       if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
       const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
-      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitted','unknown')",[input.accountId,input.token]);
+      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')",[input.accountId,input.token]);
       const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds withdrawable ledger balance.");
-      await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,asset_address,recipient_address,amount_base_units,status,idempotency_key)
-        VALUES($1,$2,$3,$4,$5,'reserved',$6)`,[input.id,input.accountId,input.token,input.recipient,input.amount,input.idempotencyKey]);
+      await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,source_address,asset_address,recipient_address,amount_base_units,status,idempotency_key)
+        VALUES($1,$2,LOWER($3),LOWER($4),LOWER($5),$6,'reserved',$7)`,[input.id,input.accountId,input.sourceAddress,input.token,input.recipient,amount.toString(),input.idempotencyKey]);
+      await c.query(
+        "INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,details) VALUES($1,NULL,'reserved',$2,$3::jsonb)",
+        [input.id,"withdrawal:"+input.id+":reserved",JSON.stringify({accountId:input.accountId,sourceAddress:input.sourceAddress.toLowerCase(),token:input.token.toLowerCase(),recipient:input.recipient.toLowerCase(),amountBaseUnits:amount.toString(),idempotencyKey:input.idempotencyKey})],
+      );
       await c.query("COMMIT");return {reserved:true};
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
+
+  /** Persist intent to submit before any external broadcaster is invoked. */
+  async beginWithdrawalSubmission(id:string):Promise<void>{
+    if(!id.trim())throw new Error("Withdrawal ID is required.");
+    const c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const q=await c.query("SELECT status,account_id,source_address,asset_address,transaction_hash,nonce,submission_started_at FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[id]);
+      const row=q.rows[0];
+      if(!row)throw new Error("Withdrawal reservation not found.");
+      if(row.status==="submitting"&&row.submission_started_at){await c.query("COMMIT");return;}
+      if(row.status!=="reserved"||row.transaction_hash||row.nonce!==null)throw new Error("Only an untouched reserved withdrawal can begin submission.");
+      if(!row.source_address)throw new Error("Withdrawal submission requires a configured source address.");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",["treebot-account-restriction",String(row.account_id).toLowerCase()]);
+      const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
+      if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal submission blocked by execution emergency stop.");
+      const restriction=await c.query("SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",[row.account_id]);
+      if(restriction.rowCount)throw new Error("Withdrawal submission blocked by an active account restriction.");
+      await c.query("UPDATE execution_withdrawal_reservations SET status='submitting',submission_started_at=NOW(),updated_at=NOW() WHERE id=$1",[id]);
+      await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,details) VALUES($1,'reserved','submitting',$2,$3::jsonb)",
+        [id,"withdrawal:"+id+":submitting",JSON.stringify({releaseEnabled:false,requiresAuthorizedBroadcaster:true})]);
+      await c.query("COMMIT");
+    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  }
+
+  async recordWithdrawalSubmission(input:{id:string;transactionHash:string;nonce:number}):Promise<void>{
+    if(!input.id.trim()||!/^0x[0-9a-fA-F]{64}$/.test(input.transactionHash)||!Number.isSafeInteger(input.nonce)||input.nonce<0)throw new Error("Invalid withdrawal submission identity, transaction hash, or nonce.");
+    const txHash=input.transactionHash.toLowerCase(),c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const q=await c.query("SELECT status,transaction_hash,nonce FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[input.id]);
+      const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
+      if(row.status==="submitted"&&String(row.transaction_hash).toLowerCase()===txHash&&Number(row.nonce)===input.nonce){await c.query("COMMIT");return;}
+      if(row.status!=="submitting")throw new Error("Withdrawal submission must be preceded by a durable submitting state.");
+      await c.query("UPDATE execution_withdrawal_reservations SET status='submitted',transaction_hash=$2,nonce=$3,submitted_at=NOW(),updated_at=NOW() WHERE id=$1",[input.id,txHash,input.nonce]);
+      await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,transaction_hash,nonce,details) VALUES($1,'submitting','submitted',$2,$3,$4,$5::jsonb)",
+        [input.id,"withdrawal:"+input.id+":submitted:"+txHash,txHash,input.nonce,JSON.stringify({submissionRecorded:true})]);
+      await c.query("COMMIT");
+    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  }
+
+  /** An ambiguous submission remains held and must be reconciled; this never releases funds. */
+  async recordWithdrawalUnknown(input:{id:string;reason:string}):Promise<void>{
+    if(!input.id.trim()||!input.reason.trim())throw new Error("Withdrawal ID and unknown-state reason are required.");
+    const c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const q=await c.query("SELECT status,transaction_hash,nonce FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[input.id]);
+      const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
+      if(!["submitting","submitted","unknown"].includes(String(row.status)))throw new Error("Only a possibly broadcast withdrawal can enter UNKNOWN.");
+      await c.query("UPDATE execution_withdrawal_reservations SET status='unknown',failure_reason=$2,updated_at=NOW() WHERE id=$1",[input.id,input.reason.slice(0,500)]);
+      const txHash=row.transaction_hash?String(row.transaction_hash).toLowerCase():"unresolved";
+      await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,transaction_hash,nonce,details) VALUES($1,$2,'unknown',$3,$4,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING",
+        [input.id,String(row.status),"withdrawal:"+input.id+":unknown:"+txHash,row.transaction_hash,row.nonce,JSON.stringify({reason:input.reason.slice(0,500),retryAllowed:false,reservationRetained:true})]);
+      await c.query("COMMIT");
+    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  }
+
+  /** Cancellation is safe only before the durable submitting transition and requires an authenticated operator at the caller. */
+  async cancelWithdrawalBeforeSubmission(input:{id:string;actorId:string;reason:string}):Promise<void>{
+    if(!input.id.trim()||!input.actorId.trim()||!input.reason.trim())throw new Error("Withdrawal ID, actor, and cancellation reason are required.");
+    const c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const q=await c.query("SELECT status,transaction_hash,nonce,submission_started_at FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[input.id]);
+      const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
+      if(row.status==="cancelled"){await c.query("COMMIT");return;}
+      if(row.status!=="reserved"||row.transaction_hash||row.nonce!==null||row.submission_started_at)throw new Error("Cannot cancel a withdrawal that may have been submitted; reconcile it instead.");
+      await c.query("UPDATE execution_withdrawal_reservations SET status='cancelled',failure_reason=$2,updated_at=NOW() WHERE id=$1",[input.id,input.reason.slice(0,500)]);
+      await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,details) VALUES($1,'reserved','cancelled',$2,$3::jsonb) ON CONFLICT(event_key) DO NOTHING",
+        [input.id,"withdrawal:"+input.id+":cancelled",JSON.stringify({actorId:input.actorId,reason:input.reason.slice(0,500),broadcastImpossibleByStateMachine:true})]);
+      await c.query("COMMIT");
+    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  }
+
+  async settleWithdrawal(proof:VerifiedWithdrawalSettlement):Promise<{settled:boolean;status:"confirmed"|"reverted"}>{
+    if(!isIssuedWithdrawalSettlement(proof))throw new Error("Withdrawal settlement rejected: trusted canonical receipt proof is required.");
+    const c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const q=await c.query("SELECT * FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[proof.withdrawalId]);
+      const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
+      if(["confirmed","reverted"].includes(String(row.status))){
+        const same=String(row.transaction_hash).toLowerCase()===proof.transactionHash.toLowerCase()&&
+          String(row.confirmation_block)===proof.blockNumber&&String(row.confirmation_block_hash).toLowerCase()===proof.blockHash.toLowerCase()&&
+          row.settlement_status===proof.status&&String(row.settlement_actual_amount)===proof.actualAmountBaseUnits&&String(row.settlement_gas_wei)===proof.gasWei;
+        if(!same)throw new Error("Conflicting settlement proof for an already terminal withdrawal.");
+        await c.query("COMMIT");return {settled:false,status:proof.status};
+      }
+      if(!["submitting","submitted","unknown"].includes(String(row.status)))throw new Error("Withdrawal is not eligible for settlement.");
+      if(!row.source_address||String(row.source_address).toLowerCase()!==proof.sourceAddress.toLowerCase()||
+        String(row.asset_address).toLowerCase()!==proof.tokenAddress.toLowerCase()||
+        String(row.recipient_address).toLowerCase()!==proof.recipientAddress.toLowerCase()||
+        String(row.amount_base_units)!==proof.reservedAmountBaseUnits||
+        (row.transaction_hash&&String(row.transaction_hash).toLowerCase()!==proof.transactionHash.toLowerCase())){
+        throw new Error("Settlement proof does not match the immutable withdrawal reservation.");
+      }
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(row.account_id),String(row.asset_address).toLowerCase()]);
+      const nextStatus=proof.status;
+      const evidence=JSON.stringify({withdrawalId:proof.withdrawalId,chainId:proof.chainId,transactionHash:proof.transactionHash.toLowerCase(),
+        status:proof.status,sourceAddress:proof.sourceAddress.toLowerCase(),tokenAddress:proof.tokenAddress.toLowerCase(),
+        recipientAddress:proof.recipientAddress.toLowerCase(),reservedAmountBaseUnits:proof.reservedAmountBaseUnits,
+        actualAmountBaseUnits:proof.actualAmountBaseUnits,logIndex:proof.logIndex,blockNumber:proof.blockNumber,
+        blockHash:proof.blockHash.toLowerCase(),confirmations:proof.confirmations,requiredConfirmations:proof.requiredConfirmations,gasWei:proof.gasWei});
+      await c.query(`UPDATE execution_withdrawal_reservations SET status=$2,transaction_hash=COALESCE(transaction_hash,$3),
+        confirmation_block=$4,confirmation_block_hash=LOWER($5),settlement_actual_amount=$6,settlement_gas_wei=$7,
+        settlement_status=$2,settlement_evidence=$8::jsonb,settlement_verified_at=NOW(),settled_at=NOW(),
+        failure_reason=CASE WHEN $2='reverted' THEN 'On-chain withdrawal reverted; principal was not debited.' ELSE NULL END,updated_at=NOW()
+        WHERE id=$1`,[proof.withdrawalId,nextStatus,proof.transactionHash.toLowerCase(),proof.blockNumber,proof.blockHash,
+        proof.actualAmountBaseUnits,proof.gasWei,evidence]);
+      if(proof.status==="confirmed"){
+        await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'withdrawal',LOWER($3),-$4::numeric,137,$5,$6::jsonb)`,
+          [row.account_id,"withdrawal:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId+":token",row.asset_address,
+            proof.actualAmountBaseUnits,proof.transactionHash.toLowerCase(),evidence]);
+      }
+      if(BigInt(proof.gasWei)>0n){
+        await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb)`,
+          [row.account_id,"withdrawal:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId+":gas",proof.gasWei,proof.transactionHash.toLowerCase(),evidence]);
+      }
+      await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,transaction_hash,nonce,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
+        [proof.withdrawalId,String(row.status),nextStatus,"withdrawal:"+proof.withdrawalId+":settled:"+proof.transactionHash.toLowerCase(),
+          proof.transactionHash.toLowerCase(),row.nonce,evidence]);
+      await c.query("COMMIT");return {settled:true,status:proof.status};
+    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  }
+
   async reconcileWallet(input:{walletAddress:string;token:string;chainBalance:string;ledgerBalance:string}):Promise<{matched:boolean;discrepancy:string}>{
     const chain=assertNonNegativeBaseUnits(input.chainBalance,"chain balance"),ledger=assertNonNegativeBaseUnits(input.ledgerBalance,"ledger balance");
     const discrepancy=chain-ledger,matched=discrepancy===0n,c=await this.pool.connect();
