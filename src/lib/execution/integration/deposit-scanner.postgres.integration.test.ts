@@ -27,7 +27,6 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     if (!pool) return;
     await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
-    await pool.query("DELETE FROM execution_deposit_events WHERE account_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
