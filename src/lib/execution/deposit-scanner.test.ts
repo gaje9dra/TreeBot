@@ -80,11 +80,12 @@ describe("PolygonDepositScanner", () => {
   it("scans block ranges, checks canonical log blocks, and advances a durable checkpoint", async () => {
     const f = fixture();
     await expect(f.scanner.scanOnce()).resolves.toEqual({
-      fromBlock: "100", toBlock: "107", inserted: 0, credited: 0, reversed: 0,
+      fromBlock: "100", toBlock: "107", inserted: 1, credited: 1, reversed: 0,
     });
     expect(f.chain.getLogs).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 100n, toBlock: 107n }));
     expect(f.getNext()).toBe(108n);
     expect(f.getLastHash()).toBe(blockHash(107));
+    expect(f.observations.size).toBe(1);
   });
 
   it("rejects non-Polygon RPC", async () => {
