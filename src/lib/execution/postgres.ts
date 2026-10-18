@@ -170,8 +170,8 @@ export class PostgresExecutionStore {
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal blocked by execution emergency stop.");
       const restriction=await c.query(
-        "SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",
-        [input.accountId],
+        "SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1),LOWER($2)) AND status='active' LIMIT 1",
+        [input.accountId,input.sourceAddress],
       );
       if(restriction.rowCount)throw new Error("Withdrawal blocked by an active account financial-integrity restriction.");
       const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.sourceAddress,input.token]);
@@ -207,7 +207,7 @@ export class PostgresExecutionStore {
       if(!row.source_address)throw new Error("Withdrawal submission requires a configured source address.");
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal submission blocked by execution emergency stop.");
-      const restriction=await c.query("SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1",[row.account_id]);
+      const restriction=await c.query("SELECT 1 FROM execution_account_restrictions WHERE account_id IN ($1,LOWER($1),LOWER($2)) AND status='active' LIMIT 1",[row.account_id,row.source_address]);
       if(restriction.rowCount)throw new Error("Withdrawal submission blocked by an active account restriction.");
       await c.query("UPDATE execution_withdrawal_reservations SET status='submitting',submission_started_at=NOW(),updated_at=NOW() WHERE id=$1",[id]);
       await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,details) VALUES($1,'reserved','submitting',$2,$3::jsonb)",
