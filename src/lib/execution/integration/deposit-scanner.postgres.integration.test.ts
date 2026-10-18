@@ -418,6 +418,10 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       "INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')",
       [wallet, token],
     );
+    await pool.query(
+      "INSERT INTO execution_authorizations(id,owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount,expires_at,authorized_by) VALUES($1,$2,137,$3::jsonb,$4::jsonb,1000,NOW()+INTERVAL '1 hour','owner_wallet')",
+      [prefix + "-trade-auth", wallet, JSON.stringify([token]), JSON.stringify([recipient])],
+    );
     await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
     const trade = executionStore.createOrGetIntent({
       id: prefix + "-trade-race",
