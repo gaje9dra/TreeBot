@@ -67,73 +67,7 @@ export class PostgresExecutionStore {
            AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')`,
         [input.walletAddress,input.sellToken],
       );
-      const heldTrades=await c.query(
-        `SELECT COALESCE(SUM(sell_amount),0)::text AS amount FROM execution_transactions
-         WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(sell_token)=LOWER($2)
-           AND status IN('prepared','signed','submitted','pending','unknown','replaced')`,
-        [input.walletAddress,input.sellToken],
-      );
-      const available=BigInt(ledger.rows[0]?.amount??"0")-BigInt(heldWithdrawals.rows[0]?.amount??"0")-BigInt(heldTrades.rows[0]?.amount??"0");
-      if(available<0n||sellAmount>available)throw new Error("Execution exceeds available ledger balance after active trade and withdrawal reservations.");
-
-      const inserted=await c.query(`INSERT INTO execution_transactions
-        (id,idempotency_key,chain_id,wallet_address,sell_token,buy_token,side,sell_amount,quote,authorization_id,risk_checks,prepared_transaction,status)
-        VALUES($1,$2,137,$3,LOWER($4),LOWER($5),'sell',$6,$7::jsonb,$8,$9::jsonb,$10::jsonb,'prepared')
-        ON CONFLICT(idempotency_key) DO NOTHING RETURNING *`,
-        [input.id,input.idempotencyKey,input.walletAddress,input.sellToken,input.buyToken,sellAmount.toString(),
-          JSON.stringify(input.quote),input.authorizationId,JSON.stringify(input.riskChecks),JSON.stringify(input.preparedTransaction)]);
-      if(inserted.rowCount!==1){
-        const exact=await sameIntent();
-        if(!exact.rowCount)throw new Error("Execution idempotency key was concurrently claimed by different immutable transaction parameters.");
-        const replay=await c.query("SELECT * FROM execution_transactions WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
-        const record=toRecord(replay.rows[0] as Record<string,unknown>);
-        await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'idempotent_replay',$2::jsonb)",
-          [record.id,JSON.stringify({idempotencyKey:input.idempotencyKey})]);
-        await c.query("COMMIT");return {record,created:false};
-      }
-      const record=toRecord(inserted.rows[0] as Record<string,unknown>);
-      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'intent_reserved',$2::jsonb)",
-        [record.id,JSON.stringify({idempotencyKey:input.idempotencyKey,sellAmount:sellAmount.toString(),availableBeforeReservation:available.toString()})]);
-      await c.query("COMMIT");return {record,created:true};
-    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
-  }
-  async leasePreparedIntent(workerId:string,leaseMs=30_000):Promise<StoredExecutionIntent|null>{
-    if(!workerId.trim()||!Number.isInteger(leaseMs)||leaseMs<1000||leaseMs>300_000)throw new Error("Invalid worker lease.");
-    const r=await this.pool.query(`WITH candidate AS (
-      SELECT id FROM execution_transactions
-      WHERE status='prepared' AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
-        AND EXISTS (SELECT 1 FROM execution_control WHERE id=1 AND emergency_stop=FALSE)
-        AND NOT EXISTS (
-          SELECT 1 FROM execution_account_restrictions r
-          WHERE r.status='active'
-            AND r.account_id IN (execution_transactions.wallet_address,LOWER(execution_transactions.wallet_address))
-        )
-      ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
-      FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,leaseMs]);
-    const row=r.rows[0] as Record<string,unknown>|undefined;return row?toRecord(row):null;
-  }
-  async recordBroadcast(id:string,workerId:string,txHash:string,nonce:number):Promise<void>{
-    if(!/^0x[0-9a-fA-F]{64}$/.test(txHash)||!Number.isSafeInteger(nonce)||nonce<0)throw new Error("Invalid broadcast hash or nonce.");
-    const c=await this.pool.connect();
-    try{
-      await c.query("BEGIN");
-      const u=await c.query(`UPDATE execution_transactions SET tx_hash=$3,nonce=$4,status='submitted',updated_at=NOW(),lease_owner=NULL,lease_expires_at=NULL
-        WHERE id=$1 AND lease_owner=$2 AND status='prepared' RETURNING id`,[id,workerId,txHash.toLowerCase(),nonce]);
-      if(u.rowCount!==1)throw new Error("Intent is not leased by this worker or is no longer prepared.");
-      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'broadcast_recorded',$2::jsonb)",
-        [id,JSON.stringify({txHash:txHash.toLowerCase(),nonce})]);
-      await c.query("COMMIT");
-    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
-  }
-  async recordSubmissionUnknown(id:string,message:string):Promise<void>{
-    const m=message.slice(0,500);
-    await this.pool.query(`UPDATE execution_transactions SET status='unknown',error_code='SUBMISSION_UNKNOWN',error_message=$2,updated_at=NOW()
-      WHERE id=$1 AND status IN ('prepared','signed','submitted','pending')`,[id,m]);
-    await this.pool.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'submission_unknown',$2::jsonb)",
-      [id,JSON.stringify({message:m,retryAllowed:false})]);
-  }
-  async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
+      const heldTrades=await c.que  async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
     assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
     assertNonNegativeBaseUnits(input.gasWei,"gas");
     if(input.realizedPnlBaseUnits!==undefined&&!/^-?(0|[1-9][0-9]*)$/.test(input.realizedPnlBaseUnits))throw new Error("Invalid realized P&L base-unit value.");
@@ -142,6 +76,13 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
+      const initial=await c.query("SELECT wallet_address,sell_token,buy_token,sell_amount,tx_hash FROM execution_transactions WHERE id=$1",[input.id]);
+      const initialRow=initial.rows[0];
+      if(!initialRow?.tx_hash)throw new Error("Settlement requires a recorded transaction hash.");
+      if(input.status==="confirmed"&&BigInt(input.actualSellAmount)!==BigInt(initialRow.sell_amount))throw new Error("Confirmed trade sell amount must match the reserved exact-input amount.");
+      if(input.status==="reverted"&&(input.actualSellAmount!=="0"||input.actualBuyAmount!=="0"))throw new Error("Reverted trade settlement cannot move token principal.");
+      const assets=[String(initialRow.sell_token).toLowerCase(),String(initialRow.buy_token).toLowerCase()].sort();
+      for(const asset of assets)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initialRow.wallet_address).toLowerCase(),asset]);
       const u=await c.query(`UPDATE execution_transactions SET status=$2,confirmation_block=$3,actual_sell_amount=$4,actual_buy_amount=$5,actual_gas_wei=$6,
         confirmed_at=CASE WHEN $2='confirmed' THEN NOW() ELSE NULL END,updated_at=NOW()
         WHERE id=$1 AND status IN ('submitted','pending','unknown','replaced') RETURNING id`,
@@ -149,7 +90,7 @@ export class PostgresExecutionStore {
       if(u.rowCount!==1)throw new Error("Transaction is not eligible for settlement reconciliation.");
       await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'settlement_reconciled',$2::jsonb)",[input.id,JSON.stringify(input)]);
       if(input.status==="confirmed"){
-        const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[input.id]);
+        const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token,sell_amount FROM execution_transactions WHERE id=$1",[input.id]);
         const row=q.rows[0];if(!row?.tx_hash)throw new Error("Confirmed settlement requires transaction hash.");
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
           VALUES($1,$2,'trade_sell',$3,-$4::numeric,137,$5,$6::jsonb),($1,$7,'trade_buy',$8,$9,137,$5,$6::jsonb),($1,$10,'gas','0x0000000000000000000000000000000000000000',-$11::numeric,137,$5,$6::jsonb)
@@ -166,6 +107,12 @@ export class PostgresExecutionStore {
             VALUES($1,$2,'fee',$3,-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
             [row.wallet_address,`${row.tx_hash}:fee`,row.buy_token,input.quoteFeeBaseUnits,row.tx_hash,JSON.stringify({executionId:input.id})]);
         }
+      }else if(BigInt(input.gasWei)>0n){
+        const q=await c.query("SELECT tx_hash,wallet_address FROM execution_transactions WHERE id=$1",[input.id]);
+        const row=q.rows[0];if(!row?.tx_hash)throw new Error("Reverted settlement requires transaction hash.");
+        await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb)`,
+          [row.wallet_address,String(row.tx_hash)+":gas",input.gasWei,String(row.tx_hash),JSON.stringify({executionId:input.id,reverted:true})]);
       }
       await c.query("COMMIT");
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
