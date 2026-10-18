@@ -52,6 +52,11 @@ export class PostgresExecutionStore {
       SELECT id FROM execution_transactions
       WHERE status='prepared' AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
         AND EXISTS (SELECT 1 FROM execution_control WHERE id=1 AND emergency_stop=FALSE)
+        AND NOT EXISTS (
+          SELECT 1 FROM execution_account_restrictions r
+          WHERE r.status='active'
+            AND r.account_id IN (execution_transactions.wallet_address,LOWER(execution_transactions.wallet_address))
+        )
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
       FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,leaseMs]);
