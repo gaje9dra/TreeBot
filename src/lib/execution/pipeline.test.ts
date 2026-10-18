@@ -10,7 +10,7 @@ const target = "0x0000000000000000000000000000000000000004";
 const auth = { id:"a1",owner,chainId:137,allowedTokens:[sell,buy],allowedTargets:[target],maximumSellAmount:"1000000",
  expiresAt:2_000_000_000_000,revokedAt:null,authorizedBy:"audited_smart_account" as const };
 
-function dependencies(overrides: Partial<ExecutionDependencies> = {}) {
+function dependencies(overrides: Partial<ExecutionDependencies> = {}): ExecutionDependencies {
   const quote = { provider:"0x" as const,chainId:137 as const,sellToken:sell as `0x${string}`,buyToken:buy as `0x${string}`,
     sellAmount:100n,buyAmount:200n,minBuyAmount:190n,taker:owner as `0x${string}`,allowanceTarget:null,
     transaction:{to:target as `0x${string}`,data:"0x12345678" as `0x${string}`,value:0n},liquiditySources:[],estimatedGas:100n,
@@ -23,7 +23,7 @@ function dependencies(overrides: Partial<ExecutionDependencies> = {}) {
     loadRiskState:vi.fn(async()=>({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:50,allowedTokens:[sell,buy],allowedTargets:[target]})),
     now:()=>1_800_000_000_000,
   };
-  return { ...base,...overrides };
+  return { ...base,...overrides } as ExecutionDependencies;
 }
 function request() { return {id:"tx1",idempotencyKey:"key1",owner,sellToken:sell,buyToken:buy,sellAmount:"100",slippageBps:50,authorization:auth}; }
 
