@@ -14,6 +14,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contract-tests:
+    name: Foundry local EVM contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Format Solidity sources
+        run: forge fmt
+      - name: Run restricted-vault local EVM tests
+        run: forge test --root . -vvv
   validate:
     name: Validate application
     runs-on: ubuntu-latest
@@ -24,7 +38,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Apply repository formatting
         run: npx prettier --write .
       - name: Verify formatting
@@ -33,8 +47,17 @@ jobs:
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
-      - name: Unit tests
+      - name: Unit and boundary tests
         run: npm test
+      - name: Polygon RPC integration tests (explicitly gated; test RPC only)
+        run: npm run test:integration
+        env:
+          TREEBOT_RUN_CHAIN_INTEGRATION: ${{ secrets.TREEBOT_RUN_CHAIN_INTEGRATION }}
+          TREEBOT_INTEGRATION_RPC_URL: ${{ secrets.TREEBOT_INTEGRATION_RPC_URL }}
+          TREEBOT_TEST_WALLET_ADDRESS: ${{ secrets.TREEBOT_TEST_WALLET_ADDRESS }}
+          TREEBOT_TEST_SELL_TOKEN: ${{ secrets.TREEBOT_TEST_SELL_TOKEN }}
+          TREEBOT_TEST_BUY_TOKEN: ${{ secrets.TREEBOT_TEST_BUY_TOKEN }}
+          TREEBOT_TEST_TARGET: ${{ secrets.TREEBOT_TEST_TARGET }}
       - name: Production build
         run: npm run build
         env:
@@ -52,10 +75,15 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
-      - name: Audit all dependencies with scoped exception
+      - name: Audit full dependency tree
         run: |
-          npm audit --json > /tmp/treebot-npm-audit.json || true
-          node scripts/security-audit.mjs /tmp/treebot-npm-audit.json
+          audit_status=0
+          npm audit --json > npm-audit.json || audit_status=$?
+          if [ "$audit_status" -gt 1 ]; then
+            cat npm-audit.json
+            exit "$audit_status"
+          fi
+          node scripts/security-audit.mjs npm-audit.json
