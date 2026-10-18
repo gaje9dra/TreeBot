@@ -263,7 +263,31 @@ export class PostgresExecutionStore {
         [proof.executionId,evidence]);
 
       const accountId=String(row.wallet_address);
+      const quoteToken=this.accountingQuoteToken;
+      let accountingStatus:"pending"|"complete"|"reconciliation_required"|"not_applicable"=proof.status==="reverted"?"not_applicable":"pending";
+      let costBasisAllocated:string|null=null;
+      let realizedPnl:string|null=null;
+      let costBasisFailure:string|null=null;
+      let priorSellQty=0n,priorBuyQty=0n,priorSellCost=0n,priorBuyCost=0n,priorSellBasisQty=0n;
+      let sellBasisComplete=false,buyBasisComplete=false;
       if(proof.status==="confirmed"){
+        const priorSellInventoryQ=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) FOR UPDATE",[accountId,proof.sellToken]);
+        const priorBuyInventoryQ=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) FOR UPDATE",[accountId,proof.buyToken]);
+        priorSellQty=BigInt(priorSellInventoryQ.rows[0]?.quantity??"0");
+        priorBuyQty=BigInt(priorBuyInventoryQ.rows[0]?.quantity??"0");
+        if(quoteToken&&proof.sellToken.toLowerCase()===quoteToken){
+          const basis=await c.query("SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) FOR UPDATE",[accountId,proof.buyToken,quoteToken]);
+          buyBasisComplete=(!basis.rows[0]&&priorBuyQty===0n)||(!!basis.rows[0]&&basis.rows[0].cost_basis_status==="complete"&&BigInt(String(basis.rows[0].quantity))===priorBuyQty);
+          priorBuyCost=buyBasisComplete&&basis.rows[0]?BigInt(String(basis.rows[0].cost_basis)):0n;
+        }else if(quoteToken&&proof.buyToken.toLowerCase()===quoteToken){
+          const basis=await c.query("SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) FOR UPDATE",[accountId,proof.sellToken,quoteToken]);
+          sellBasisComplete=!!basis.rows[0]&&basis.rows[0].cost_basis_status==="complete"&&BigInt(String(basis.rows[0].quantity))===priorSellQty&&priorSellQty>=BigInt(proof.actualSellAmountBaseUnits);
+          priorSellBasisQty=BigInt(String(basis.rows[0]?.quantity??"0"));
+          priorSellCost=sellBasisComplete?BigInt(String(basis.rows[0].cost_basis)):0n;
+        }else{
+          accountingStatus="reconciliation_required";
+          costBasisFailure=quoteToken?"Cross-asset settlement lacks a canonical quote-token side.":"Canonical accounting quote token is not configured.";
+        }
         const sellInventory=await c.query(
           `UPDATE execution_position_inventory SET quantity_base_units=quantity_base_units-$3::numeric,updated_at=NOW()
            WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) AND quantity_base_units >= $3::numeric
@@ -299,6 +323,48 @@ export class PostgresExecutionStore {
         await syncPosition(proof.sellToken,String(sellQuantity.rows[0]?.quantity??"0"));
         await syncPosition(proof.buyToken,String(buyQuantity.rows[0]?.quantity??"0"));
 
+        if(quoteToken&&proof.sellToken.toLowerCase()===quoteToken){
+          const newQuantity=priorBuyQty+BigInt(proof.actualBuyAmountBaseUnits);
+          const newCostBasis=buyBasisComplete?priorBuyCost+BigInt(proof.actualSellAmountBaseUnits):0n;
+          await c.query(
+            `INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+             VALUES($1,LOWER($2),$3::numeric,$4::numeric,$5,NOW(),$6)
+             ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET quantity_base_units=EXCLUDED.quantity_base_units,
+               cost_basis_quote_base_units=EXCLUDED.cost_basis_quote_base_units,cost_basis_status=EXCLUDED.cost_basis_status,updated_at=NOW()`,
+            [accountId,proof.buyToken,newQuantity.toString(),newCostBasis.toString(),quoteToken,buyBasisComplete?"complete":"pending"],
+          );
+          accountingStatus=buyBasisComplete?"complete":"pending";
+        }else if(quoteToken&&proof.buyToken.toLowerCase()===quoteToken){
+          if(sellBasisComplete){
+            const allocated=(priorSellCost*BigInt(proof.actualSellAmountBaseUnits))/priorSellBasisQty;
+            costBasisAllocated=allocated.toString();
+            realizedPnl=(BigInt(proof.actualBuyAmountBaseUnits)-allocated).toString();
+            const reducedQuantity=priorSellBasisQty-BigInt(proof.actualSellAmountBaseUnits);
+            const reducedCost=priorSellCost-allocated;
+            await c.query(
+              `UPDATE execution_open_positions SET quantity_base_units=$4::numeric,cost_basis_quote_base_units=$5::numeric,cost_basis_status='complete',updated_at=NOW()
+               WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)`,
+              [accountId,proof.sellToken,quoteToken,reducedQuantity.toString(),reducedCost.toString()],
+            );
+            await c.query(
+              `INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+               VALUES($1,$2,'realized_pnl',LOWER($3),$4::numeric,137,$5,$6::jsonb)`,
+              [accountId,proof.transactionHash+":pnl",quoteToken,realizedPnl,proof.transactionHash,evidence],
+            );
+            accountingStatus="complete";
+          }else{
+            accountingStatus="reconciliation_required";
+            costBasisFailure="A sale settled without complete cost basis covering the full sell-token inventory.";
+            await c.query(
+              "UPDATE execution_open_positions SET cost_basis_status='reconciliation_required',updated_at=NOW() WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)",
+              [accountId,proof.sellToken,quoteToken],
+            );
+          }
+        }else{
+          accountingStatus="reconciliation_required";
+          costBasisFailure=costBasisFailure??"Trade accounting cannot value this settlement in the configured quote token.";
+        }
+
         const reconcileAsset=async(asset:string,inventoryQuantity:string)=>{
           const ledger=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[accountId,asset]);
           const ledgerQuantity=BigInt(ledger.rows[0]?.quantity??"0"), inventory=BigInt(inventoryQuantity);
@@ -326,11 +392,34 @@ export class PostgresExecutionStore {
         };
         await reconcileAsset(proof.sellToken,String(sellQuantity.rows[0]?.quantity??"0"));
         await reconcileAsset(proof.buyToken,String(buyQuantity.rows[0]?.quantity??"0"));
+        if(costBasisFailure){
+          const incidentKey="trade-cost-basis:137:"+proof.transactionHash.toLowerCase();
+          const details=JSON.stringify({executionId:proof.executionId,transactionHash:proof.transactionHash,quoteToken,cause:costBasisFailure,
+            sellToken:proof.sellToken,buyToken:proof.buyToken,sellAmount:proof.actualSellAmountBaseUnits,buyAmount:proof.actualBuyAmountBaseUnits});
+          await c.query(
+            `INSERT INTO execution_financial_incidents(incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,status,details)
+             VALUES($1,'settlement_conflict',$2,LOWER($3),$4::numeric,137,$5,NULL,'open',$6::jsonb) ON CONFLICT(incident_key) DO NOTHING`,
+            [incidentKey,accountId,proof.sellToken,proof.actualSellAmountBaseUnits,proof.transactionHash,details],
+          );
+          await c.query(
+            `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+             VALUES($1,$2,'operator_hold','active','Trade cost basis requires reconciliation.',$3::jsonb) ON CONFLICT(restriction_key) DO NOTHING`,
+            [accountId,incidentKey,details],
+          );
+          await c.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+        }
       }else if(BigInt(proof.gasWei)>0n){
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
           VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb)`,
           [accountId,proof.transactionHash+":gas",proof.gasWei,proof.transactionHash,evidence]);
       }
+      await c.query(
+        `INSERT INTO execution_trade_accounting(execution_id,chain_id,account_id,sell_asset,buy_asset,sell_amount_base_units,buy_amount_base_units,gas_wei,
+          quote_asset_address,cost_basis_allocated_quote_base_units,realized_pnl_quote_base_units,accounting_status,details)
+         VALUES($1,137,$2,LOWER($3),LOWER($4),$5::numeric,$6::numeric,$7::numeric,$8,$9::numeric,$10::numeric,$11,$12::jsonb)`,
+        [proof.executionId,accountId,proof.sellToken,proof.buyToken,proof.actualSellAmountBaseUnits,proof.actualBuyAmountBaseUnits,proof.gasWei,
+          quoteToken,costBasisAllocated,realizedPnl,accountingStatus,JSON.stringify({proofStatus:proof.status,costBasisFailure})],
+      );
       await c.query("COMMIT");
       return {settled:true,status:proof.status};
     }catch(error){await c.query("ROLLBACK").catch(()=>undefined);throw error;}finally{c.release();}
