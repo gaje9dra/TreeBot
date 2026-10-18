@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import type { Address, Hash, Hex } from "viem";
 import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres";
 import { PolygonDepositScanner, type DepositRangeReader } from "../deposit-scanner";
+import { verifyWithdrawalSettlement, type WithdrawalChainReader } from "../withdrawal-verifier";
 
 const enabled = process.env.TREEBOT_RUN_POSTGRES_INTEGRATION === "true";
 const describePostgres = enabled ? describe : describe.skip;
@@ -25,6 +26,9 @@ describePostgres("PostgresDepositScannerStore integration", () => {
 
   afterAll(async () => {
     if (!pool) return;
+    await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+    await pool.query("DELETE FROM execution_withdrawal_audit_events WHERE withdrawal_id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_withdrawal_reservations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1", [`${prefix}%`]);
@@ -305,6 +309,98 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       [txHash],
     );
     expect(lifecycle.rows).toEqual([{ credited_event_key: "deposit:137:" + txHash.toLowerCase() + ":1", status: "confirmed" }]);
+  });
+
+
+  it("serializes competing withdrawals and settles only from verified canonical receipts", async () => {
+    const accountId = prefix + "-withdrawal-settlement-account";
+    const source = "0x0000000000000000000000000000000000000040" as Address;
+    const recipient = "0x0000000000000000000000000000000000000050" as Address;
+    const executionStore = new PostgresExecutionStore(pool);
+    await pool.query(
+      "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
+      [accountId, prefix + "-withdrawal-funding", token, hash(800)],
+    );
+    await pool.query(
+      "INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')",
+      [source, token],
+    );
+    await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
+    const ids = [prefix + "-withdrawal-race-a", prefix + "-withdrawal-race-b"];
+    const attempts = await Promise.allSettled(ids.map((id) => executionStore.reserveWithdrawal({
+      id, accountId, sourceAddress: source, token, recipient, amount: "700", idempotencyKey: id + "-key",
+    })));
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winnerIndex = attempts.findIndex((result) => result.status === "fulfilled");
+    const winnerId = ids[winnerIndex]!;
+    await expect(executionStore.reserveWithdrawal({
+      id: winnerId, accountId, sourceAddress: source, token, recipient, amount: "700", idempotencyKey: winnerId + "-key",
+    })).resolves.toEqual({ reserved: false });
+
+    await executionStore.beginWithdrawalSubmission(winnerId);
+    const successHash = hash(802);
+    await executionStore.recordWithdrawalSubmission({ id: winnerId, transactionHash: successHash, nonce: 21 });
+    await expect(executionStore.recordWithdrawalSubmission({ id: winnerId, transactionHash: successHash, nonce: 21 })).resolves.toBeUndefined();
+
+    const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
+    const addressTopic = (address: Address): Hex => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as Hex;
+    const chainFor = (txHash: Hash, blockNumber: number, status: "success" | "reverted", amount: string, gasUsed: bigint, gasPrice: bigint) => ({
+      getChainId: async () => 137,
+      getTransactionReceipt: async () => ({
+        transactionHash: txHash, status, blockNumber: BigInt(blockNumber), blockHash: hash(blockNumber),
+        gasUsed, effectiveGasPrice: gasPrice,
+        logs: status === "success" ? [{
+          address: token,
+          data: ("0x" + BigInt(amount).toString(16).padStart(64, "0")) as Hex,
+          topics: [transferTopic, addressTopic(source), addressTopic(recipient)],
+          logIndex: 9,
+        }] : [],
+      }),
+      getTransaction: async () => ({ hash: txHash, from: source, to: token }),
+      getBlockNumber: async () => 900n,
+      getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({
+        number: blockNumber, hash: hash(Number(blockNumber)), parentHash: hash(Number(blockNumber - 1n)),
+      }),
+    }) as unknown as WithdrawalChainReader;
+    const successProof = await verifyWithdrawalSettlement(
+      chainFor(successHash, 802, "success", "700", 100_000n, 30n),
+      { withdrawalId: winnerId, transactionHash: successHash, sourceAddress: source, tokenAddress: token,
+        recipientAddress: recipient, amountBaseUnits: "700", requiredConfirmations: 64 },
+    );
+    await expect(executionStore.settleWithdrawal(successProof)).resolves.toEqual({ settled: true, status: "confirmed" });
+    await expect(executionStore.settleWithdrawal(successProof)).resolves.toEqual({ settled: false, status: "confirmed" });
+    await expect(executionStore.getLedgerBalance(accountId, token)).resolves.toBe("300");
+
+    const unknownId = prefix + "-withdrawal-unknown";
+    await expect(executionStore.reserveWithdrawal({
+      id: unknownId, accountId, sourceAddress: source, token, recipient, amount: "200", idempotencyKey: unknownId + "-key",
+    })).resolves.toEqual({ reserved: true });
+    await executionStore.beginWithdrawalSubmission(unknownId);
+    await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "RPC timed out after submission may have started" });
+    const unknown = await pool.query("SELECT status FROM execution_withdrawal_reservations WHERE id=$1", [unknownId]);
+    expect(unknown.rows[0].status).toBe("unknown");
+    await expect(executionStore.cancelWithdrawalBeforeSubmission({
+      id: unknownId, actorId: "integration-operator", reason: "attempted unsafe cancellation",
+    })).rejects.toThrow(/may have been submitted/);
+    await expect(executionStore.beginWithdrawalSubmission(unknownId)).rejects.toThrow(/Only an untouched reserved withdrawal/);
+
+    const revertedHash = hash(803);
+    const revertedProof = await verifyWithdrawalSettlement(
+      chainFor(revertedHash, 803, "reverted", "200", 80_000n, 20n),
+      { withdrawalId: unknownId, transactionHash: revertedHash, sourceAddress: source, tokenAddress: token,
+        recipientAddress: recipient, amountBaseUnits: "200", requiredConfirmations: 64 },
+    );
+    await expect(executionStore.settleWithdrawal(revertedProof)).resolves.toEqual({ settled: true, status: "reverted" });
+    await expect(executionStore.getLedgerBalance(accountId, token)).resolves.toBe("300");
+    const terminal = await pool.query("SELECT status,settlement_actual_amount::text,settlement_gas_wei::text FROM execution_withdrawal_reservations WHERE id=$1", [unknownId]);
+    expect(terminal.rows[0]).toEqual({ status: "reverted", settlement_actual_amount: "0", settlement_gas_wei: "1600000" });
+    const gasEntries = await pool.query(
+      "SELECT amount_base_units::text FROM execution_ledger_entries WHERE account_id=$1 AND entry_type='gas' AND transaction_hash IN ($2,$3) ORDER BY transaction_hash",
+      [accountId, successHash, revertedHash],
+    );
+    expect(gasEntries.rows.map((row) => row.amount_base_units)).toEqual(["-3000000", "-1600000"]);
+    await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 
 });
