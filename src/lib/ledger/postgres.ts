@@ -120,7 +120,7 @@ export class PostgresPaperLedger {
       reservedQuote: position ? numberValue(position.entry_notional_quote) : 0,
       dailyStartEquityQuote: dailyStart,
       peakEquityQuote: peak,
-      openPositions: position ? [{ pair, notionalQuote: quantity * markPrice, direction: "long" }] : [],
+      openPositions: position ? [{ pair, notionalQuote: quantity * effectiveMarkPrice, direction: "long" }] : [],
       consecutiveLosses: Number(row.consecutive_losses),
       tradesLastHour: Number(tradesResult.rows[0]?.count ?? 0),
       gasSpentQuote: gasSpent,
