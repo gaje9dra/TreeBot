@@ -49,7 +49,7 @@ describe("Polygon execution pipeline boundaries",()=>{
     const d=dependencies({loadRiskState:vi.fn()
       .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:50,allowedTokens:[sell,buy],allowedTargets:[target]})
       .mockResolvedValueOnce({tradingEnabled:false,emergencyStop:true,maximumSlippageBps:50,allowedTokens:[sell,buy],allowedTargets:[target]})});
-    const p=new PolygonExecutionPipeline(d as any);
+    const p=new PolygonExecutionPipeline(d);
     const prepared=await p.prepare(request());
     await expect(p.submitPrepared(prepared,request())).rejects.toThrow(/emergency stop/);
   });
