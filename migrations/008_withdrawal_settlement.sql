@@ -19,6 +19,10 @@ ALTER TABLE execution_withdrawal_reservations
   ADD COLUMN IF NOT EXISTS settlement_verified_at TIMESTAMPTZ;
 
 ALTER TABLE execution_withdrawal_reservations
+  DROP CONSTRAINT IF EXISTS execution_withdrawal_source_address_check,
+  DROP CONSTRAINT IF EXISTS execution_withdrawal_nonce_nonnegative_check,
+  DROP CONSTRAINT IF EXISTS execution_withdrawal_settlement_evidence_check;
+ALTER TABLE execution_withdrawal_reservations
   ADD CONSTRAINT execution_withdrawal_source_address_check
     CHECK (source_address IS NULL OR source_address ~ '^0x[0-9a-fA-F]{40}
 
