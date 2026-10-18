@@ -23,17 +23,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - name: Install dependencies
-        run: npm install
-      - name: Apply repository formatting
-        run: npx prettier --write .
-      - name: Verify formatting
+        run: npm ci
+      - name: Verify formatting (do not rewrite the checkout)
         run: npm run format:check
       - name: Lint
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
-      - name: Unit tests
+      - name: Unit and boundary tests
         run: npm test
       - name: Production build
         run: npm run build
@@ -51,11 +50,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
-      - name: Audit all dependencies with scoped exception
-        run: |
-          npm audit --json > /tmp/treebot-npm-audit.json || true
-          node scripts/security-audit.mjs /tmp/treebot-npm-audit.json
+      - name: Audit full dependency tree
+        run: npm audit --audit-level=high
