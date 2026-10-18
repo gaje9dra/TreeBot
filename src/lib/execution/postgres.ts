@@ -367,7 +367,7 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           }
           const restricted = await c.query(
             `SELECT 1 FROM execution_account_restrictions
-             WHERE status='active' AND account_id IN ($1,LOWER($2)) LIMIT 1`,
+             WHERE status='active' AND account_id IN ($1,LOWER($1),LOWER($2)) LIMIT 1`,
             [event.accountId, event.senderAddress],
           );
           if (restricted.rowCount) throw new Error("Deposit credit blocked by an active account or wallet restriction.");
@@ -408,14 +408,14 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           } else {
             const existing = await c.query(
               `SELECT account_id,LOWER(asset_address) AS asset_address,amount_base_units::text,LOWER(from_address) AS from_address,
-                      LOWER(to_address) AS to_address,block_number::text,LOWER(block_hash) AS block_hash,token_decimals,receipt_status
+                      LOWER(to_address) AS to_address,LOWER(vault_address) AS vault_address,block_number::text,LOWER(block_hash) AS block_hash,token_decimals,receipt_status
                FROM execution_deposit_events WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
               [event.transactionHash.toLowerCase(),event.logIndex],
             );
             const prior = existing.rows[0];
             if (!prior || prior.account_id !== event.accountId ||
                 prior.asset_address !== event.assetAddress.toLowerCase() || prior.amount_base_units !== amount.toString() ||
-                prior.from_address !== event.senderAddress.toLowerCase() || prior.to_address !== event.vaultAddress.toLowerCase() ||
+                prior.from_address !== event.senderAddress.toLowerCase() || prior.to_address !== event.vaultAddress.toLowerCase() || prior.vault_address !== event.vaultAddress.toLowerCase() ||
                 prior.block_number !== blockNumber.toString() || prior.block_hash !== event.blockHash.toLowerCase() ||
                 Number(prior.token_decimals) !== proof.tokenDecimals || prior.receipt_status !== proof.receiptStatus) {
               throw new Error("Duplicate deposit identity conflicts with its immutable verified funding provenance.");
