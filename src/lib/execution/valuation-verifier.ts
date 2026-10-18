@@ -103,6 +103,8 @@ export async function verifyChainlinkAssetValuation(
   ]);
   if(primaryBlock.number!==finalBlock||fallbackBlock.number!==finalBlock||primaryBlock.hash.toLowerCase()!==fallbackBlock.hash.toLowerCase())
     throw new Error("Valuation RPC providers disagree on the finalized Polygon block hash.");
+  const nowSeconds=BigInt(Math.floor(Date.now()/1000));
+  if(primaryBlock.timestamp>nowSeconds+60n)throw new Error("Finalized Polygon block timestamp is unexpectedly in the future.");
   const [assetFeedDecimals,quoteFeedDecimals,assetRound,quoteRound]=await Promise.all([
     primary.readFeedDecimals({address:getAddress(request.assetFeedAddress),blockNumber:finalBlock}),
     primary.readFeedDecimals({address:getAddress(request.quoteFeedAddress),blockNumber:finalBlock}),
@@ -125,8 +127,9 @@ export async function verifyChainlinkAssetValuation(
   const observedAtMs=Number(primaryBlock.timestamp)*1000;
   if(!Number.isSafeInteger(observedAtMs))throw new Error("Finalized block timestamp is outside the supported date range.");
   const observedAt=new Date(observedAtMs);
-  const freshnessDeadline=new Date((primaryBlock.timestamp+BigInt(request.maxStalenessSeconds))*1000n>BigInt(Number.MAX_SAFE_INTEGER)
-    ?Number.MAX_SAFE_INTEGER:Number((primaryBlock.timestamp+BigInt(request.maxStalenessSeconds))*1000n));
+  const freshnessDeadlineMs=(primaryBlock.timestamp+BigInt(request.maxStalenessSeconds))*1000n;
+  if(freshnessDeadlineMs<=BigInt(Date.now()))throw new Error("Valuation is already stale at verification time.");
+  const freshnessDeadline=new Date(freshnessDeadlineMs>BigInt(Number.MAX_SAFE_INTEGER)?Number.MAX_SAFE_INTEGER:Number(freshnessDeadlineMs));
   const proof:VerifiedAssetValuation=Object.freeze({
     chainId:137,accountId:request.accountId,assetAddress:getAddress(request.assetAddress),quoteAssetAddress:getAddress(request.quoteAssetAddress),
     priceNumerator:numerator.toString(),priceDenominator:denominator.toString(),tokenDecimals:request.tokenDecimals,valuationSource:SOURCE,
