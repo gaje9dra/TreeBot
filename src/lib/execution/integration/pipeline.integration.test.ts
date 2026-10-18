@@ -12,15 +12,15 @@ const sell = (process.env.TREEBOT_TEST_SELL_TOKEN ?? "0x000000000000000000000000
 const buy = (process.env.TREEBOT_TEST_BUY_TOKEN ?? "0x0000000000000000000000000000000000000002") as Address;
 const target = (process.env.TREEBOT_TEST_TARGET ?? "0x0000000000000000000000000000000000000004") as Address;
 
-const testAddresses = [owner, sell, buy, target];
-if (!testAddresses.every((address) => isAddress(address))) {
-  throw new Error("Invalid TREEBOT test address configuration.");
+function checkedAddress(value: string, label: string): Address {
+  if (!isAddress(value, { strict: false })) throw new Error(`Invalid ${label} address configuration.`);
+  return getAddress(value);
 }
 const checksummed = {
-  owner: getAddress(owner),
-  sell: getAddress(sell),
-  buy: getAddress(buy),
-  target: getAddress(target),
+  owner: checkedAddress(owner, "TREEBOT_TEST_WALLET_ADDRESS"),
+  sell: checkedAddress(sell, "TREEBOT_TEST_SELL_TOKEN"),
+  buy: checkedAddress(buy, "TREEBOT_TEST_BUY_TOKEN"),
+  target: checkedAddress(target, "TREEBOT_TEST_TARGET"),
 };
 
 describeChain("Polygon execution chain integration", () => {
