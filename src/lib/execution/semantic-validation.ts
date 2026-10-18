@@ -77,7 +77,9 @@ export function validateReviewedSwapCalldata(
   }
   let decoded: { functionName: string; args: readonly unknown[] };
   try {
-    decoded = decodeFunctionData({ abi: route.abi, data: expected.data });
+    const result = decodeFunctionData({ abi: route.abi, data: expected.data });
+    if (result.args === undefined) throw new Error("Reviewed route calldata has no decodable arguments.");
+    decoded = { functionName: result.functionName, args: result.args };
   } catch {
     throw new Error("Swap calldata cannot be decoded by the reviewed ABI.");
   }
