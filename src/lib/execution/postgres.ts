@@ -26,7 +26,6 @@ export class PostgresExecutionStore {
     if(input.sellToken.toLowerCase()===input.buyToken.toLowerCase())throw new Error("Sell and buy token must differ.");
     const sellAmount=assertPositiveBaseUnits(input.sellAmount,"sell amount");
     const target=String(input.preparedTransaction.to??"");
-    if(!/^0x[0-9a-fA-F]{40}$/.test(target))throw new Error("Prepared transaction target must be an explicit address.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
@@ -38,6 +37,7 @@ export class PostgresExecutionStore {
         [input.walletAddress],
       );
       if(restriction.rowCount)throw new Error("Execution blocked because this account has an active financial-integrity restriction.");
+      if(!/^0x[0-9a-fA-F]{40}$/.test(target))throw new Error("Prepared transaction target must be an explicit address.");
 
       const sameIntent=async()=>c.query(
         `SELECT 1 FROM execution_transactions WHERE id=$1 AND idempotency_key=$2
@@ -259,7 +259,8 @@ export class PostgresExecutionStore {
       if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
       const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
       const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE (account_id=$1 OR LOWER(source_address)=LOWER($3)) AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')",[input.accountId,input.token,input.sourceAddress]);
-      const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds withdrawable ledger balance.");
+      const heldTrades=await c.query("SELECT COALESCE(SUM(sell_amount),0)::text AS v FROM execution_transactions WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(sell_token)=LOWER($2) AND status IN('prepared','awaiting_signature','signed','submitted','pending','unknown','replaced')",[input.sourceAddress,input.token]);
+      const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0")-BigInt(heldTrades.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds available ledger balance after active trade and withdrawal reservations.");
       await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,source_address,asset_address,recipient_address,amount_base_units,status,idempotency_key)
         VALUES($1,$2,LOWER($3),LOWER($4),LOWER($5),$6,'reserved',$7)`,[input.id,input.accountId,input.sourceAddress,input.token,input.recipient,amount.toString(),input.idempotencyKey]);
       await c.query(
