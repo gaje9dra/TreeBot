@@ -191,6 +191,7 @@ export class ZeroExPolygonQuoteAdapter {
       throw new QuoteValidationError("Malformed transaction calldata.");
     }
     const value = integer(tx.value ?? "0", "transaction value", true);
+    if (value !== 0n) throw new QuoteValidationError("Native transaction value is forbidden for this ERC-20 swap pipeline.");
     const gas = tx.gas !== undefined ? integer(tx.gas, "transaction gas") : undefined;
     const gasPrice = tx.gasPrice !== undefined ? integer(tx.gasPrice, "transaction gas price", true) : undefined;
     const allowanceIssues = q.issues && typeof q.issues === "object" ? q.issues as Record<string, unknown> : {};
