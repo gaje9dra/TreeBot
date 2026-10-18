@@ -37,7 +37,7 @@ export function authorizeExecution(authorization: ExecutionAuthorization, intent
     }
     if (BigInt(authorization.dailySellAmount ?? "0") + amount > BigInt(authorization.maximumDailySellAmount)) return { allowed: false, reason: "Aggregate daily spending limit exceeded." };
   }
-  if (![intent.sellToken,intent.buyToken,intent.transactionTarget,...authorization.allowedTokens,...authorization.allowedTargets].every(isAddress)) return { allowed: false, reason: "Authorization or intent contains an invalid address." };
+  if (![intent.sellToken,intent.buyToken,intent.transactionTarget,...authorization.allowedTokens,...authorization.allowedTargets].every((address) => isAddress(address))) return { allowed: false, reason: "Authorization or intent contains an invalid address." };
   const tokens = new Set(authorization.allowedTokens.map((token) => getAddress(token).toLowerCase()));
   if (!tokens.has(getAddress(intent.sellToken).toLowerCase()) || !tokens.has(getAddress(intent.buyToken).toLowerCase())) return { allowed: false, reason: "Token is outside the authorization scope." };
   const targets = new Set(authorization.allowedTargets.map((target) => getAddress(target).toLowerCase()));
