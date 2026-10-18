@@ -109,9 +109,9 @@ export class PostgresExecutionStore {
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
   /**
-   * Deposit ledger insertion is intentionally disabled until a private server-side watcher
-   * can present independently verified receipt/log/finality evidence. Caller-supplied booleans
-   * are not proof of an on-chain event and must never create credit.
+   * Direct caller-supplied deposit records are never sufficient proof of funds.
+   * This remains disabled even when the scanner has observed a matching event:
+   * only a separately designed proof-bearing credit API may write spendable funds.
    */
   async recordDepositEvent(_input: {
     accountId: string;
