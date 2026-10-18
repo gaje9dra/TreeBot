@@ -10,7 +10,6 @@ export interface ExecutionIntentInput {
 export interface StoredExecutionIntent extends ExecutionIntentInput {
   status: TransactionStatus; txHash: string | null; nonce: number | null;
 }
-
 function toRecord(row: Record<string, unknown>): StoredExecutionIntent {
   return { id: String(row.id), idempotencyKey: String(row.idempotency_key), walletAddress: String(row.wallet_address),
     sellToken: String(row.sell_token), buyToken: String(row.buy_token), sellAmount: String(row.sell_amount),
@@ -19,11 +18,9 @@ function toRecord(row: Record<string, unknown>): StoredExecutionIntent {
     status: row.status as TransactionStatus, txHash: row.tx_hash ? String(row.tx_hash) : null,
     nonce: row.nonce === null || row.nonce === undefined ? null : Number(row.nonce) };
 }
-
 export class PostgresExecutionStore {
   constructor(private readonly pool: Pool) {}
-
-  /** Reserve the idempotency key durably before any signer/broadcaster can act. */
+  /** Persist reservation before any submission attempt. Same idempotency key maps to the same record. */
   async createOrGetIntent(input: ExecutionIntentInput): Promise<{ record: StoredExecutionIntent; created: boolean }> {
     if (!input.id.trim() || !input.idempotencyKey.trim()) throw new Error("Intent ID and idempotency key are required.");
     if (input.sellToken.toLowerCase() === input.buyToken.toLowerCase()) throw new Error("Sell and buy token must differ.");
@@ -51,8 +48,7 @@ export class PostgresExecutionStore {
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
     finally { client.release(); }
   }
-
-  /** Lease one item for a worker without allowing two workers to prepare it simultaneously. */
+  /** Atomic worker lease. The SKIP LOCKED selection and row update prevent duplicate preparation. */
   async leasePreparedIntent(workerId: string, leaseMs = 30_000): Promise<StoredExecutionIntent | null> {
     if (!workerId.trim() || !Number.isInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 300_000) throw new Error("Invalid worker lease.");
     const result = await this.pool.query(
@@ -67,7 +63,6 @@ export class PostgresExecutionStore {
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? toRecord(row) : null;
   }
-
   async recordBroadcast(id: string, workerId: string, txHash: string, nonce: number): Promise<void> {
     if (!/^0x[0-9a-fA-F]{64}$/.test(txHash) || !Number.isSafeInteger(nonce) || nonce < 0) throw new Error("Invalid broadcast hash or nonce.");
     const client = await this.pool.connect();
@@ -83,16 +78,13 @@ export class PostgresExecutionStore {
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
     finally { client.release(); }
   }
-
   async recordSubmissionUnknown(id: string, message: string): Promise<void> {
     const safeMessage = message.slice(0,500);
-    await this.pool.query(
-      `UPDATE execution_transactions SET status='unknown',error_code='SUBMISSION_UNKNOWN',error_message=$2,updated_at=NOW()
-       WHERE id=$1 AND status IN ('prepared','signed','submitted','pending')`, [id,safeMessage]);
+    await this.pool.query(`UPDATE execution_transactions SET status='unknown',error_code='SUBMISSION_UNKNOWN',error_message=$2,updated_at=NOW()
+      WHERE id=$1 AND status IN ('prepared','signed','submitted','pending')`, [id,safeMessage]);
     await this.pool.query("INSERT INTO execution_audit_events (transaction_id,event_type,details) VALUES ($1,'submission_unknown',$2::jsonb)",
       [id,JSON.stringify({ message: safeMessage,retryAllowed: false })]);
   }
-
   async recordSettlement(input: { id: string; status: "confirmed" | "reverted"; blockNumber: string; actualSellAmount: string; actualBuyAmount: string; gasWei: string }): Promise<void> {
     assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");
     assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
@@ -109,11 +101,78 @@ export class PostgresExecutionStore {
       if (updated.rowCount !== 1) throw new Error("Transaction is not eligible for settlement reconciliation.");
       await client.query("INSERT INTO execution_audit_events (transaction_id,event_type,details) VALUES ($1,'settlement_reconciled',$2::jsonb)",
         [input.id,JSON.stringify(input)]);
+      if (input.status === "confirmed") {
+        // Each financial leg has its own stable key and shares the transaction hash, allowing
+        // replay-safe accounting and an auditable comparison with the chain receipt.
+        const tx = await client.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1", [input.id]);
+        const row = tx.rows[0];
+        if (!row?.tx_hash) throw new Error("Confirmed settlement requires the transaction hash.");
+        await client.query(
+          `INSERT INTO execution_ledger_entries (account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+           VALUES ($1,$2,'trade_sell',$3,$4,137,$5,$6::jsonb),($1,$7,'trade_buy',$8,$9,137,$5,$6::jsonb),($1,$10,'gas','0x0000000000000000000000000000000000000000',$11,137,$5,$6::jsonb)
+           ON CONFLICT (event_key) DO NOTHING`,
+          [row.wallet_address,`${row.tx_hash}:sell`,row.sell_token,input.actualSellAmount,row.tx_hash,JSON.stringify({ executionId:input.id }),
+            `${row.tx_hash}:buy`,row.buy_token,input.actualBuyAmount,`${row.tx_hash}:gas`,input.gasWei]);
+      }
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
     finally { client.release(); }
   }
-
+  async recordDepositEvent(input: {
+    accountId: string; token: string; amount: string; from: string; to: string; txHash: string; logIndex: number;
+    blockNumber: string; confirmed: boolean; confirmations: number; requiredConfirmations?: number;
+  }): Promise<{ credited: boolean }> {
+    assertPositiveBaseUnits(input.amount,"deposit amount");
+    if (!input.confirmed || input.confirmations < (input.requiredConfirmations ?? 3)) throw new Error("Deposit is not sufficiently confirmed.");
+    if (!/^0x[0-9a-fA-F]{64}$/.test(input.txHash) || !Number.isInteger(input.logIndex) || input.logIndex < 0 ||
+        !/^[1-9][0-9]*$/.test(input.blockNumber)) throw new Error("Invalid deposit event identity.");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query(
+        `INSERT INTO execution_deposit_events(chain_id,transaction_hash,log_index,account_id,asset_address,amount_base_units,from_address,to_address,block_number,confirmed_at)
+         VALUES(137,$1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(chain_id,transaction_hash,log_index) DO NOTHING RETURNING transaction_hash`,
+        [input.txHash.toLowerCase(),input.logIndex,input.accountId,input.token,input.amount,input.from,input.to,input.blockNumber]);
+      if (inserted.rowCount === 1) {
+        await client.query(
+          `INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+           VALUES($1,$2,'deposit',$3,$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+          [input.accountId,`${input.txHash.toLowerCase()}:${input.logIndex}:deposit`,input.token,input.amount,input.txHash.toLowerCase(),
+            JSON.stringify({ from:input.from,to:input.to,blockNumber:input.blockNumber })]);
+      }
+      await client.query("COMMIT");
+      return { credited: inserted.rowCount === 1 };
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
+  /** Reserve withdrawal and verify available ledger balance inside one serializable transaction. */
+  async reserveWithdrawal(input: {
+    id: string; accountId: string; token: string; recipient: string; amount: string; idempotencyKey: string;
+  }): Promise<{ reserved: boolean }> {
+    const amount = assertPositiveBaseUnits(input.amount,"withdrawal amount");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const existing = await client.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE", [input.idempotencyKey]);
+      if (existing.rowCount) { await client.query("COMMIT"); return { reserved:false }; }
+      const balance = await client.query(
+        `SELECT COALESCE(SUM(amount_base_units),0)::text AS balance FROM execution_ledger_entries WHERE account_id=$1 AND asset_address=$2`,
+        [input.accountId,input.token]);
+      const reserved = await client.query(
+        `SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_withdrawal_reservations
+         WHERE account_id=$1 AND asset_address=$2 AND status IN ('reserved','submitted','unknown')`,
+        [input.accountId,input.token]);
+      const available = BigInt(balance.rows[0]?.balance ?? "0") - BigInt(reserved.rows[0]?.amount ?? "0");
+      if (amount > available) throw new Error("Withdrawal exceeds withdrawable ledger balance.");
+      await client.query(
+        `INSERT INTO execution_withdrawal_reservations(id,account_id,asset_address,recipient_address,amount_base_units,status,idempotency_key)
+         VALUES($1,$2,$3,$4,$5,'reserved',$6)`,
+        [input.id,input.accountId,input.token,input.recipient,input.amount,input.idempotencyKey]);
+      await client.query("COMMIT");
+      return { reserved:true };
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
   async reconcileWallet(input: { walletAddress: string; token: string; chainBalance: string; ledgerBalance: string }): Promise<{ matched: boolean; discrepancy: string }> {
     const chain = assertNonNegativeBaseUnits(input.chainBalance,"chain balance");
     const ledger = assertNonNegativeBaseUnits(input.ledgerBalance,"ledger balance");
@@ -125,7 +184,7 @@ export class PostgresExecutionStore {
       await client.query(
         `INSERT INTO execution_reconciliation (wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status,reconciled_at)
          VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
-        [input.walletAddress,input.token,chain.toString(),ledger.toString(),discrepancy.toString(),matched ? "matched" : "mismatch"]);
+        [input.walletAddress,input.token,chain.toString(),ledger.toString(),discrepancy.toString(),matched ? "matched":"mismatch"]);
       if (!matched) {
         await client.query("UPDATE execution_control SET emergency_stop=TRUE,mismatch_detected_at=NOW() WHERE id=1");
         await client.query("INSERT INTO execution_audit_events (event_type,details) VALUES ('balance_mismatch',$1::jsonb)",
@@ -134,6 +193,6 @@ export class PostgresExecutionStore {
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
     finally { client.release(); }
-    return { matched, discrepancy: discrepancy.toString() };
+    return { matched,discrepancy:discrepancy.toString() };
   }
 }
