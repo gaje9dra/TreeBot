@@ -284,7 +284,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       accountForSender: async () => accountId,
     });
     const results = await Promise.allSettled([scanner.scanOnce(), scanner.scanOnce()]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejectionMessages = results.filter((result) => result.status === "rejected").map((result) => String(result.reason));
+    expect(results.filter((result) => result.status === "fulfilled"), rejectionMessages.join("\n")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     const ledger = await pool.query(
       "SELECT event_key,amount_base_units::text,details->>'tokenDecimals' AS decimals FROM execution_ledger_entries WHERE account_id=$1 AND entry_type='deposit'",
