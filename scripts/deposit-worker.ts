@@ -1,7 +1,7 @@
 import { loadEnvConfig } from "@next/env";
 import { createLedgerPool } from "@/lib/ledger/postgres";
 import { loadConfig } from "@/lib/config";
-import { PostgresExecutionStore } from "@/lib/execution/postgres";
+import { PostgresDepositScannerStore } from "@/lib/execution/postgres";
 import { PolygonDepositScanner } from "@/lib/execution/deposit-scanner";
 import { ViemPolygonDepositReader } from "@/lib/execution/polygon-deposit-reader";
 import { assertDepositWorkerActivation, parseDepositWorkerSettings, runDepositWorker } from "@/lib/execution/deposit-worker";
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   try {
     const primary = new ViemPolygonDepositReader(settings.primaryRpcUrl);
     const fallback = new ViemPolygonDepositReader(settings.fallbackRpcUrl);
-    const store = new PostgresExecutionStore(pool);
+    const store = new PostgresDepositScannerStore(pool);
     const scanner = new PolygonDepositScanner(primary, store, {
       watcherKey: settings.workerKey,
       startBlock: settings.startBlock,
