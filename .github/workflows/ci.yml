@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Apply repository formatting
         run: npx prettier --write .
       - name: Verify formatting
