@@ -1,4 +1,7 @@
+import { loadEnvConfig } from "@next/env";
 import { createLedgerPool } from "../src/lib/ledger/postgres";
+
+loadEnvConfig(process.cwd());
 
 const command = process.argv[2];
 const pool = createLedgerPool();
