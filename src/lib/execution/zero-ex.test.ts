@@ -28,7 +28,7 @@ function response(payload: unknown, status = 200): Response {
 
 describe("0x Polygon quote adapter", () => {
   it("requests chain 137 and validates a supported executable quote", async () => {
-    const fetcher = vi.fn(async () => response(fixture()));
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => response(fixture()));
     const quote = await adapter(fetcher as typeof fetch).getFirmQuote({
       sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50,
     });
@@ -63,7 +63,7 @@ describe("0x Polygon quote adapter", () => {
       minBuyAmount: 2487500n, taker, allowanceTarget: null,
       transaction: { to: target, data: "0x12345678" as `0x${string}`, value: 0n },
       liquiditySources: [], estimatedGas: null, quoteTimestamp: 1, priceImpactBps: null, slippageBps: 50, rawFeeAmounts: [],
-    } as const;
+    };
     expect(estimateQuoteAmounts(quote, 6, 6)).toEqual({ sellAmountHuman: 1, buyAmountHuman: 2.5, minimumBuyAmountHuman: 2.4875 });
   });
 });
