@@ -1,5 +1,6 @@
 import type { Address, Hash, Hex } from "viem";
 import type { DepositChainReader, DepositReceipt } from "./deposit-watcher";
+import { issueVerifiedDepositProof, type VerifiedDepositProof } from "./deposit-proof";
 
 export interface ScannedDepositLog {
   chainId: 137;
@@ -14,6 +15,8 @@ export interface ScannedDepositLog {
   blockHash: Hash;
   confirmations: number;
   requiredConfirmations: number;
+  /** Present only when the scanner had an explicit token-decimals policy for this token. */
+  proof?: VerifiedDepositProof;
 }
 
 export interface DepositLogCandidate {
@@ -94,6 +97,8 @@ export interface DepositScannerConfig {
   startBlock: bigint;
   vaultAddress: Address;
   supportedTokenAddresses: readonly Address[];
+  /** Explicit on-chain decimals for each allowlisted token; without this, observations are never credited. */
+  tokenDecimalsByAddress?: Readonly<Record<string, number>>;
   confirmations: number;
   maxBlockRange: number;
   accountForSender: (sender: Address) => Promise<string | null>;
@@ -120,6 +125,11 @@ export class PolygonDepositScanner {
     if (!config.watcherKey.trim()) throw new Error("A durable watcher key is required.");
     if (config.startBlock < 0n) throw new Error("Start block cannot be negative.");
     if (!config.supportedTokenAddresses.length) throw new Error("At least one supported deposit token is required.");
+    for (const [token, decimals] of Object.entries(config.tokenDecimalsByAddress ?? {})) {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(token) || !config.supportedTokenAddresses.some((allowed) => allowed.toLowerCase() === token.toLowerCase()) || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+        throw new Error("Token decimals policy must contain valid decimals for allowlisted token addresses only.");
+      }
+    }
     if (!Number.isInteger(config.confirmations) || config.confirmations < 1 || config.confirmations > 10_000) {
       throw new Error("Confirmations must be an integer between 1 and 10000.");
     }
@@ -223,6 +233,20 @@ export class PolygonDepositScanner {
       if (!accountId) continue;
       const confirmationsBig = current >= log.blockNumber ? current - log.blockNumber + 1n : 0n;
       const confirmations = Number(confirmationsBig > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : confirmationsBig);
+      const tokenDecimals = this.config.tokenDecimalsByAddress?.[log.tokenAddress.toLowerCase()];
+      const proof = tokenDecimals === undefined ? undefined : issueVerifiedDepositProof({
+        chainId: 137,
+        transactionHash: log.transactionHash,
+        logIndex: log.logIndex,
+        accountId,
+        tokenAddress: log.tokenAddress,
+        senderAddress: log.senderAddress,
+        recipientAddress: this.config.vaultAddress,
+        amountBaseUnits: log.amount.toString(),
+        blockNumber: log.blockNumber.toString(),
+        blockHash: log.blockHash,
+        tokenDecimals,
+      });
       observations.push({
         chainId: 137,
         transactionHash: log.transactionHash,
@@ -236,6 +260,7 @@ export class PolygonDepositScanner {
         blockHash: log.blockHash,
         confirmations,
         requiredConfirmations: this.config.confirmations,
+        ...(proof ? { proof } : {}),
       });
     }
     const last = await this.chain.getBlock({ blockNumber: toBlock });
