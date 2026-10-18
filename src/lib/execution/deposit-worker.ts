@@ -209,7 +209,7 @@ export async function runDepositWorker(input:{
   await heartbeat(input.pool,{workerKey:input.settings.workerKey,status:"starting",lastSuccess:false,consecutiveErrors,lastError:null});
   while(!input.shouldStop()){
     try{
-      await assertRpcProviderAgreement(input.primary,input.fallback,input.settings.confirmations,BigInt(input.settings.maxBlockRange*2));
+      await assertRpcProviderAgreement(input.primary,input.fallback,input.settings.confirmations,0n);
       const result=await input.scanner.scanOnce();
       const from=BigInt(result.fromBlock),to=BigInt(result.toBlock);
       if(to>=from&&to>=0n)lastScannedBlock=to.toString();
