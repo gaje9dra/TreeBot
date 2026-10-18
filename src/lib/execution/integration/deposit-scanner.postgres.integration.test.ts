@@ -255,8 +255,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     );
     expect(stateAfterForgery.rows[0].next_block).toBe("700");
     const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as const;
-    const addressTopic = (address: string) => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as \`0x\${string}\`;
-    const amountData = ("0x" + BigInt(event.amountBaseUnits).toString(16).padStart(64, "0")) as \`0x\${string}\`;
+    const addressTopic = (address: string): Hex => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as Hex;
+    const amountData = ("0x" + BigInt(event.amountBaseUnits).toString(16).padStart(64, "0")) as Hex;
     const fakeChain = {
       getChainId: async () => 137,
       getBlockNumber: async () => 800n,
@@ -272,7 +272,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
           topics: [transferTopic, addressTopic(sender), addressTopic(vault)],
         }],
       }),
-      getTransaction: async () => ({ hash: txHash, from: sender, to: token, input: "0xa9059cbb" as \`0x\${string}\` }),
+      getTransaction: async () => ({ hash: txHash, from: sender, to: token, input: "0xa9059cbb" as Hex }),
       getLogs: async () => [{
         transactionHash: txHash, blockNumber: 700n, blockHash, logIndex: 1,
         tokenAddress: token, senderAddress: sender, recipientAddress: vault, amount: BigInt(event.amountBaseUnits),
