@@ -16,7 +16,7 @@ concurrency:
 jobs:
   bootstrap-lockfile:
     name: Bootstrap dependency lockfile (one-time)
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/') && !hashFiles('package-lock.json')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/') && hashFiles('package-lock.json') == ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
