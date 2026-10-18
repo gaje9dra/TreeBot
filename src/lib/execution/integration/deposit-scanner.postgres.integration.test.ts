@@ -9,7 +9,8 @@ const prefix = `phase24c-${process.pid}-${Date.now()}`;
 const vault = "0x0000000000000000000000000000000000000010" as Address;
 const token = "0x0000000000000000000000000000000000000020" as Address;
 const sender = "0x0000000000000000000000000000000000000030" as Address;
-const hash = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hash;
+const hashSeed = BigInt(Date.now()) * 1_000_000n + BigInt(process.pid);
+const hash = (n: number) => `0x${(hashSeed + BigInt(n)).toString(16).padStart(64, "0")}` as Hash;
 
 let pool: Pool;
 let store: PostgresDepositScannerStore;
@@ -109,6 +110,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       "UPDATE execution_deposit_lifecycle SET credited_event_key=$3 WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2",
       [watcherKey,txHash,eventKey],
     );
+    await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
     const orphaned = await store.listActiveDeposits({ chainId: 137, watcherKey, fromBlock: 100n });
     const result = await store.recoverReorg({
       chainId: 137, watcherKey, expectedNextBlock: 101n, nextBlock: 100n,
