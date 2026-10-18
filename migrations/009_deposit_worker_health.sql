@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS execution_worker_alerts (
   worker_key TEXT NOT NULL REFERENCES execution_worker_heartbeats(worker_key),
   alert_type TEXT NOT NULL CHECK (alert_type IN (
     'rpc_error','rpc_disagreement','scanner_stalled','uncredited_deposit',
-    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending','valuation_stale','cost_basis_pending'
+    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending','valuation_stale'
   )),
   severity TEXT NOT NULL CHECK (severity IN ('info','warning','critical')),
   dedupe_key TEXT NOT NULL UNIQUE,
@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS execution_worker_alerts (
   acknowledged_by TEXT,
   acknowledged_at TIMESTAMPTZ
 );
+
+ALTER TABLE execution_worker_heartbeats
+  DROP CONSTRAINT IF EXISTS execution_worker_heartbeats_worker_type_check;
+ALTER TABLE execution_worker_heartbeats
+  ADD CONSTRAINT execution_worker_heartbeats_worker_type_check CHECK (worker_type IN ('deposit','valuation'));
 
 ALTER TABLE execution_worker_alerts
   ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ;
