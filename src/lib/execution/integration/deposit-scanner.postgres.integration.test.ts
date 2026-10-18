@@ -24,6 +24,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
 
   afterAll(async () => {
     if (!pool) return;
+    await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_ledger_entries WHERE account_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
@@ -154,6 +156,17 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     expect(lifecycle.rows[0].status).toBe("reconciliation_required");
     expect(control.rows[0].emergency_stop).toBe(true);
     expect(entries.rows[0].amount_base_units).toBe("1000");
+    const incident = await pool.query(
+      "SELECT incident_type,status,account_id FROM execution_financial_incidents WHERE incident_key=$1",
+      [`deposit-reorg:137:${txHash}:0`],
+    );
+    expect(incident.rows).toEqual([{ incident_type: "deposit_reorg_after_credit", status: "open", account_id: accountId }]);
+    const restrictions = await pool.query(
+      "SELECT account_id,restriction_type,status FROM execution_account_restrictions WHERE restriction_key = ANY($1::text[]) ORDER BY account_id",
+      [[`deposit-reorg:137:${txHash}:0:account`, `deposit-reorg:137:${txHash}:0:sender`]],
+    );
+    expect(restrictions.rows).toHaveLength(2);
+    expect(restrictions.rows.every((row) => row.restriction_type === "deposit_reorg" && row.status === "active")).toBe(true);
 
     const authorizationId = `${prefix}-authorization`;
     const intentId = `${prefix}-prepared-intent`;
