@@ -7,20 +7,25 @@ import { assertLiveExecutionUnavailable } from "../authorization";
 const rpcUrl = process.env.TREEBOT_INTEGRATION_RPC_URL;
 const enabled = process.env.TREEBOT_RUN_CHAIN_INTEGRATION === "true" && Boolean(rpcUrl);
 const describeChain = enabled ? describe : describe.skip;
-const owner = (process.env.TREEBOT_TEST_WALLET_ADDRESS || "0x0000000000000000000000000000000000000003") as Address;
-const sell = (process.env.TREEBOT_TEST_SELL_TOKEN || "0x0000000000000000000000000000000000000001") as Address;
-const buy = (process.env.TREEBOT_TEST_BUY_TOKEN || "0x0000000000000000000000000000000000000002") as Address;
-const target = (process.env.TREEBOT_TEST_TARGET || "0x0000000000000000000000000000000000000004") as Address;
+const owner = process.env.TREEBOT_TEST_WALLET_ADDRESS || "0x0000000000000000000000000000000000000003";
+const sell = process.env.TREEBOT_TEST_SELL_TOKEN || "0x0000000000000000000000000000000000000001";
+const buy = process.env.TREEBOT_TEST_BUY_TOKEN || "0x0000000000000000000000000000000000000002";
+const target = process.env.TREEBOT_TEST_TARGET || "0x0000000000000000000000000000000000000004";
 
 function checkedAddress(value: string, label: string): Address {
   if (!isAddress(value, { strict: false })) throw new Error(`Invalid ${label} address configuration.`);
   return getAddress(value);
 }
-const checksummed = {
+const checksummed = enabled ? {
   owner: checkedAddress(owner, "TREEBOT_TEST_WALLET_ADDRESS"),
   sell: checkedAddress(sell, "TREEBOT_TEST_SELL_TOKEN"),
   buy: checkedAddress(buy, "TREEBOT_TEST_BUY_TOKEN"),
   target: checkedAddress(target, "TREEBOT_TEST_TARGET"),
+} : {
+  owner: "0x0000000000000000000000000000000000000003" as Address,
+  sell: "0x0000000000000000000000000000000000000001" as Address,
+  buy: "0x0000000000000000000000000000000000000002" as Address,
+  target: "0x0000000000000000000000000000000000000004" as Address,
 };
 
 describeChain("Polygon execution chain integration", () => {
