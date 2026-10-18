@@ -68,6 +68,8 @@ function fixture() {
     startBlock: 100n,
     vaultAddress: vault,
     supportedTokenAddresses: [token],
+    creditingEnabled: true,
+    tokenDecimalsByAddress: { [token.toLowerCase()]: 6 },
     confirmations: 64,
     maxBlockRange: 100,
     accountForSender: async (address) => address.toLowerCase() === sender.toLowerCase() ? "account-1" : null,
@@ -76,6 +78,16 @@ function fixture() {
 }
 
 describe("PolygonDepositScanner", () => {
+  it("fails closed unless deposit scanning is explicitly enabled", async () => {
+    const f = fixture();
+    const disabled = new PolygonDepositScanner(f.chain, f.store, {
+      watcherKey: "disabled", startBlock: 100n, vaultAddress: vault, supportedTokenAddresses: [token],
+      tokenDecimalsByAddress: { [token.toLowerCase()]: 6 }, confirmations: 64, maxBlockRange: 100,
+      accountForSender: async () => "account-1",
+    });
+    await expect(disabled.scanOnce()).rejects.toThrow(/disabled until explicitly activated/);
+    expect(f.chain.getChainId).not.toHaveBeenCalled();
+  });
   it("scans block ranges, checks canonical log blocks, and advances a durable checkpoint", async () => {
     const f = fixture();
     await expect(f.scanner.scanOnce()).resolves.toEqual({
