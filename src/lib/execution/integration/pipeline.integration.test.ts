@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Address } from "viem";
+import { getAddress, isAddress, type Address } from "viem";
 import { PolygonExecutionReadClient } from "../evm-client";
 import { PolygonExecutionPipeline, type ExecutionDependencies } from "../pipeline";
 import { assertLiveExecutionUnavailable } from "../authorization";
@@ -11,6 +11,17 @@ const owner = (process.env.TREEBOT_TEST_WALLET_ADDRESS ?? "0x0000000000000000000
 const sell = (process.env.TREEBOT_TEST_SELL_TOKEN ?? "0x0000000000000000000000000000000000000001") as Address;
 const buy = (process.env.TREEBOT_TEST_BUY_TOKEN ?? "0x0000000000000000000000000000000000000002") as Address;
 const target = (process.env.TREEBOT_TEST_TARGET ?? "0x0000000000000000000000000000000000000004") as Address;
+
+const testAddresses = [owner, sell, buy, target];
+if (!testAddresses.every((address) => isAddress(address))) {
+  throw new Error("Invalid TREEBOT test address configuration.");
+}
+const checksummed = {
+  owner: getAddress(owner),
+  sell: getAddress(sell),
+  buy: getAddress(buy),
+  target: getAddress(target),
+};
 
 describeChain("Polygon execution chain integration", () => {
   it("verifies the configured RPC is Polygon chain 137", async () => {
@@ -35,18 +46,18 @@ describe("execution safety integration boundaries", () => {
 
   it("does not call an injected broadcaster when the emergency stop changes", async () => {
     const q = {
-      provider:"0x" as const, chainId:137 as const, sellToken:sell, buyToken:buy, sellAmount:10n, buyAmount:20n,
-      minBuyAmount:19n,taker:owner,allowanceTarget:null,transaction:{to:target,data:"0x12345678" as `0x${string}`,value:0n},
+      provider:"0x" as const, chainId:137 as const, sellToken:checksummed.sell, buyToken:checksummed.buy, sellAmount:10n, buyAmount:20n,
+      minBuyAmount:19n,taker:checksummed.owner,allowanceTarget:null,transaction:{to:checksummed.target,data:"0x12345678" as `0x${string}`,value:0n},
       liquiditySources:[],estimatedGas:100n,quoteTimestamp:1,priceImpactBps:0,slippageBps:10,rawFeeAmounts:[],
     };
     const quoteClient = { getFirmQuote: vi.fn(async()=>q) };
-    const chain = { simulateExactSwap: vi.fn(async()=>({chainId:137 as const,from:owner,to:target,data:q.transaction.data,value:0n,gasEstimate:100n})) };
+    const chain = { simulateExactSwap: vi.fn(async()=>({chainId:137 as const,from:checksummed.owner,to:checksummed.target,data:q.transaction.data,value:0n,gasEstimate:100n})) };
     const store = {
       createOrGetIntent: vi.fn(async(input) => ({created:true,record:{...input,id:input.id,status:"prepared" as const,txHash:null,nonce:null}})),
       recordBroadcast: vi.fn(async()=>{}),recordSubmissionUnknown:vi.fn(async()=>{}),recordSettlement:vi.fn(async()=>{}),
     };
     const loadRiskState = vi.fn()
-      .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]})
+      .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:10,allowedTokens:[checksummed.sell,checksummed.buy],allowedTargets:[checksummed.target]})
       .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]})
       .mockResolvedValueOnce({tradingEnabled:false,emergencyStop:true,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]});
     const deps: ExecutionDependencies = {
@@ -55,8 +66,8 @@ describe("execution safety integration boundaries", () => {
       now:()=>1_800_000_000_000,
     };
     const api = new PolygonExecutionPipeline(deps);
-    const request = {id:"integration-test",idempotencyKey:"integration-test-key",owner,sellToken:sell,buyToken:buy,sellAmount:"10",slippageBps:10,
-      authorization:{id:"auth",owner,chainId:137,allowedTokens:[sell,buy],allowedTargets:[target],maximumSellAmount:"10",
+    const request = {id:"integration-test",idempotencyKey:"integration-test-key",owner:checksummed.owner,sellToken:checksummed.sell,buyToken:checksummed.buy,sellAmount:"10",slippageBps:10,
+      authorization:{id:"auth",owner:checksummed.owner,chainId:137,allowedTokens:[checksummed.sell,checksummed.buy],allowedTargets:[checksummed.target],maximumSellAmount:"10",
         expiresAt:2_000_000_000_000,revokedAt:null,authorizedBy:"audited_smart_account" as const}};
     const prepared = await api.prepare(request);
     const injectedBroadcaster = deps.submitAuthorized;
