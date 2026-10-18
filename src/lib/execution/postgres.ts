@@ -284,6 +284,7 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
       blockHash: `0x${string}`;
       confirmations: number;
       requiredConfirmations: number;
+      proof?: import("./deposit-proof").VerifiedDepositProof;
     }[];
   }): Promise<{inserted:number;credited:number;reversed:number}> {
     if (input.nextBlock <= input.expectedNextBlock) throw new Error("Next checkpoint must advance the scan range.");
