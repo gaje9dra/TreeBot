@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PolygonExecutionPipeline } from "./pipeline";
 import { assertLiveExecutionUnavailable } from "./authorization";
+import type { ExecutionDependencies } from "./pipeline";
 
 const owner = "0x0000000000000000000000000000000000000003";
 const sell = "0x0000000000000000000000000000000000000001";
@@ -9,7 +10,7 @@ const target = "0x0000000000000000000000000000000000000004";
 const auth = { id:"a1",owner,chainId:137,allowedTokens:[sell,buy],allowedTargets:[target],maximumSellAmount:"1000000",
  expiresAt:2_000_000_000_000,revokedAt:null,authorizedBy:"audited_smart_account" as const };
 
-function dependencies(overrides: Record<string,unknown> = {}) {
+function dependencies(overrides: Partial<ExecutionDependencies> = {}) {
   const quote = { provider:"0x" as const,chainId:137 as const,sellToken:sell as `0x${string}`,buyToken:buy as `0x${string}`,
     sellAmount:100n,buyAmount:200n,minBuyAmount:190n,taker:owner as `0x${string}`,allowanceTarget:null,
     transaction:{to:target as `0x${string}`,data:"0x12345678" as `0x${string}`,value:0n},liquiditySources:[],estimatedGas:100n,
@@ -17,7 +18,7 @@ function dependencies(overrides: Record<string,unknown> = {}) {
   const base = {
     quotes:{getFirmQuote:vi.fn(async()=>quote)},
     chain:{simulateExactSwap:vi.fn(async()=>({chainId:137 as const,from:owner as `0x${string}`,to:target as `0x${string}`,data:"0x12345678" as `0x${string}`,value:0n,gasEstimate:100n}))},
-    store:{createOrGetIntent:vi.fn(async(input:any)=>({record:{...input,id:input.id,status:"prepared",txHash:null,nonce:null},created:true})),
+    store:{createOrGetIntent:vi.fn(async(input) => ({record:{...input,id:input.id,status:"prepared" as const,txHash:null,nonce:null},created:true})),
       recordBroadcast:vi.fn(async()=>{}),recordSubmissionUnknown:vi.fn(async()=>{}),recordSettlement:vi.fn(async()=>{})},
     loadRiskState:vi.fn(async()=>({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:50,allowedTokens:[sell,buy],allowedTargets:[target]})),
     now:()=>1_800_000_000_000,
@@ -29,7 +30,7 @@ function request() { return {id:"tx1",idempotencyKey:"key1",owner,sellToken:sell
 describe("Polygon execution pipeline boundaries",()=>{
   it("quotes, reserves durable intent, then simulates exact transaction",async()=>{
     const d=dependencies();
-    const p=new PolygonExecutionPipeline(d as any);
+    const p=new PolygonExecutionPipeline(d);
     const result=await p.prepare(request());
     expect(d.quotes.getFirmQuote).toHaveBeenCalledOnce();
     expect(d.store.createOrGetIntent).toHaveBeenCalledOnce();
@@ -38,7 +39,7 @@ describe("Polygon execution pipeline boundaries",()=>{
   });
   it("does not proceed when emergency stop is active",async()=>{
     const d=dependencies({loadRiskState:vi.fn(async()=>({tradingEnabled:true,emergencyStop:true,maximumSlippageBps:50,allowedTokens:[sell,buy],allowedTargets:[target]}))});
-    await expect(new PolygonExecutionPipeline(d as any).prepare(request())).rejects.toThrow(/paused/);
+    await expect(new PolygonExecutionPipeline(d).prepare(request())).rejects.toThrow(/paused/);
     expect(d.quotes.getFirmQuote).not.toHaveBeenCalled();
   });
   it("never creates an implicit backend signer",()=>{
