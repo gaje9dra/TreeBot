@@ -34,6 +34,45 @@ describe("explainable decision engine", () => {
     expect(decision.accepted).toBe(false);
     expect(decision.reasons.some((r) => r.includes("below minimum"))).toBe(true);
   });
+  it("allows an exit when entry risk limits are breached and no free quote cash remains", () => {
+    let price = 100;
+    const exitCandles: Candle[] = Array.from({ length: 30 }, (_, i) => {
+      price += i < 9 ? 2 : i % 2 === 1 ? -0.8 : 0.5;
+      return {
+        timestamp: now - (29 - i) * 60_000,
+        open: price + 0.1,
+        high: price + 0.5,
+        low: price - 0.5,
+        close: price,
+        volume: 10_000 + i * 100,
+      };
+    });
+    const exitMarket = { ...market, price: exitCandles.at(-1)!.close, candles: exitCandles };
+    const exposedPortfolio: PortfolioState = {
+      ...portfolio,
+      equityQuote: 970,
+      availableQuote: 0,
+      reservedQuote: 100,
+      dailyStartEquityQuote: 1_000,
+      peakEquityQuote: 1_000,
+      openPositions: [{ pair: market.pair, notionalQuote: 100, direction: "long" }],
+      consecutiveLosses: DEFAULT_RISK_LIMITS.maximumConsecutiveLosses,
+      tradesLastHour: DEFAULT_RISK_LIMITS.maximumTradesPerHour,
+      gasSpentQuote: DEFAULT_RISK_LIMITS.maximumGasSpendQuote,
+    };
+    const decision = evaluateOpportunity({
+      market: exitMarket,
+      portfolio: exposedPortfolio,
+      availableCapitalPol: 0,
+      now,
+      limits: DEFAULT_RISK_LIMITS,
+    });
+    expect(decision.action).toBe("sell");
+    expect(decision.accepted).toBe(true);
+    expect(decision.proposedNotionalQuote).toBeGreaterThan(0);
+    expect(decision.reasons).toEqual([]);
+  });
+
   it("rejects unavailable exit liquidity", () => {
     const decision = evaluateOpportunity({ market: { ...market, executableExit: false }, portfolio, availableCapitalPol: 200, now });
     expect(decision.accepted).toBe(false);

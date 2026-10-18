@@ -36,14 +36,9 @@ export function evaluateOpportunity(input: EvaluateInput): TradeDecision {
   if (market.gasCostQuote < 0 || market.swapFeeBps < 0) reasons.push("Cost inputs cannot be negative.");
   if (!market.executableExit) reasons.push("No acceptable executable exit route is available.");
   if (dataErrors.length) reasons.push(...dataErrors);
-  if (portfolio.equityQuote <= 0 || portfolio.availableQuote <= 0) reasons.push("No positive available portfolio equity.");
+  if (portfolio.equityQuote <= 0) reasons.push("Portfolio equity is not positive.");
   const dailyLoss = portfolio.dailyStartEquityQuote > 0 ? Math.max(0, (portfolio.dailyStartEquityQuote - portfolio.equityQuote) / portfolio.dailyStartEquityQuote * 100) : 100;
   const drawdown = portfolio.peakEquityQuote > 0 ? Math.max(0, (portfolio.peakEquityQuote - portfolio.equityQuote) / portfolio.peakEquityQuote * 100) : 100;
-  if (dailyLoss >= limits.maximumDailyLossPercent) reasons.push("Maximum daily loss limit reached.");
-  if (drawdown >= limits.maximumDrawdownPercent) reasons.push("Maximum portfolio drawdown limit reached.");
-  if (portfolio.consecutiveLosses >= limits.maximumConsecutiveLosses) reasons.push("Maximum consecutive losses reached.");
-  if (portfolio.tradesLastHour >= limits.maximumTradesPerHour) reasons.push("Trade frequency limit reached.");
-  if (portfolio.gasSpentQuote >= limits.maximumGasSpendQuote) reasons.push("Gas expenditure limit reached.");
 
   const closes = candles.map((c) => c.close);
   const shortMa = sma(closes, 7);
@@ -66,16 +61,30 @@ export function evaluateOpportunity(input: EvaluateInput): TradeDecision {
     grossBps = Math.max(0, Math.abs(trendBps) * 0.25 + Math.abs(lastReturnBps) * 0.2 - volatility * 10_000 * 0.5);
   }
 
+  const pairExposure = portfolio.openPositions.filter((p) => p.pair === market.pair).reduce((s, p) => s + p.notionalQuote, 0);
+  const proposedNotional = direction === "sell"
+    ? pairExposure
+    : Math.min(input.availableCapitalPol, limits.maximumTradePol, portfolio.availableQuote);
   const costsBps = market.swapFeeBps * 2 + market.expectedSlippageBps * 2;
-  const proposedNotional = Math.min(input.availableCapitalPol, limits.maximumTradePol, portfolio.availableQuote);
   const gasBps = proposedNotional > 0 ? market.gasCostQuote / proposedNotional * 10_000 : Number.POSITIVE_INFINITY;
   const totalCostBps = costsBps + gasBps;
   const netBps = grossBps - totalCostBps;
-  if (input.availableCapitalPol < limits.minimumCapitalPol + limits.gasReservePol) reasons.push("Available wallet capital is below minimum plus reserved gas.");
-  if (proposedNotional <= 0 || proposedNotional > input.availableCapitalPol - limits.gasReservePol) reasons.push("Proposed notional exceeds gas-adjusted capital.");
-  const pairExposure = portfolio.openPositions.filter((p) => p.pair === market.pair).reduce((s, p) => s + p.notionalQuote, 0);
-  if (portfolio.equityQuote > 0 && (pairExposure + proposedNotional) / portfolio.equityQuote * 100 > limits.maximumPairExposurePercent) reasons.push("Pair exposure limit would be exceeded.");
-  if (netBps < limits.minimumExpectedNetReturnBps) reasons.push("Expected net return does not exceed the required edge after estimated costs.");
+
+  // Entry controls must never prevent a risk-reducing exit from closing an existing long.
+  if (direction === "buy") {
+    if (portfolio.availableQuote <= 0) reasons.push("No positive available portfolio equity.");
+    if (dailyLoss >= limits.maximumDailyLossPercent) reasons.push("Maximum daily loss limit reached.");
+    if (drawdown >= limits.maximumDrawdownPercent) reasons.push("Maximum portfolio drawdown limit reached.");
+    if (portfolio.consecutiveLosses >= limits.maximumConsecutiveLosses) reasons.push("Maximum consecutive losses reached.");
+    if (portfolio.tradesLastHour >= limits.maximumTradesPerHour) reasons.push("Trade frequency limit reached.");
+    if (portfolio.gasSpentQuote >= limits.maximumGasSpendQuote) reasons.push("Gas expenditure limit reached.");
+    if (input.availableCapitalPol < limits.minimumCapitalPol + limits.gasReservePol) reasons.push("Available wallet capital is below minimum plus reserved gas.");
+    if (proposedNotional <= 0 || proposedNotional > input.availableCapitalPol - limits.gasReservePol) reasons.push("Proposed notional exceeds gas-adjusted capital.");
+    if (portfolio.equityQuote > 0 && (pairExposure + proposedNotional) / portfolio.equityQuote * 100 > limits.maximumPairExposurePercent) reasons.push("Pair exposure limit would be exceeded.");
+    if (netBps < limits.minimumExpectedNetReturnBps) reasons.push("Expected net return does not exceed the required edge after estimated costs.");
+  } else if (direction === "sell") {
+    if (pairExposure <= 0 || proposedNotional <= 0) reasons.push("No open long position exists to close; short selling is not supported.");
+  }
   if (direction === "hold") reasons.push("No actionable directional signal.");
   const accepted = reasons.length === 0 && (direction === "buy" || direction === "sell");
   if (!accepted && !reasons.length) reasons.push("Candidate did not pass all approval gates.");
