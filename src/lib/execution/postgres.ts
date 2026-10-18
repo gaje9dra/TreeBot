@@ -67,9 +67,12 @@ export class PostgresExecutionStore {
     await this.pool.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'submission_unknown',$2::jsonb)",
       [id,JSON.stringify({message:m,retryAllowed:false})]);
   }
-  async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string}):Promise<void>{
+  async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
     assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
-    assertNonNegativeBaseUnits(input.gasWei,"gas");if(!/^[1-9][0-9]*$/.test(input.blockNumber))throw new Error("Invalid settlement block number.");
+    assertNonNegativeBaseUnits(input.gasWei,"gas");
+    if(input.realizedPnlBaseUnits!==undefined&&!/^-?(0|[1-9][0-9]*)$/.test(input.realizedPnlBaseUnits))throw new Error("Invalid realized P&L base-unit value.");
+    if(input.quoteFeeBaseUnits!==undefined)assertNonNegativeBaseUnits(input.quoteFeeBaseUnits,"quote fee");
+    if(!/^[1-9][0-9]*$/.test(input.blockNumber))throw new Error("Invalid settlement block number.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
@@ -83,10 +86,20 @@ export class PostgresExecutionStore {
         const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[input.id]);
         const row=q.rows[0];if(!row?.tx_hash)throw new Error("Confirmed settlement requires transaction hash.");
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'trade_sell',$3,$4,137,$5,$6::jsonb),($1,$7,'trade_buy',$8,$9,137,$5,$6::jsonb),($1,$10,'gas','0x0000000000000000000000000000000000000000',$11,137,$5,$6::jsonb)
+          VALUES($1,$2,'trade_sell',$3,-$4::numeric,137,$5,$6::jsonb),($1,$7,'trade_buy',$8,$9,137,$5,$6::jsonb),($1,$10,'gas','0x0000000000000000000000000000000000000000',-$11::numeric,137,$5,$6::jsonb)
           ON CONFLICT(event_key) DO NOTHING`,
           [row.wallet_address,`${row.tx_hash}:sell`,row.sell_token,input.actualSellAmount,row.tx_hash,JSON.stringify({executionId:input.id}),
             `${row.tx_hash}:buy`,row.buy_token,input.actualBuyAmount,`${row.tx_hash}:gas`,input.gasWei]);
+        if(input.realizedPnlBaseUnits!==undefined&&input.realizedPnlBaseUnits!=="0"){
+          await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+            VALUES($1,$2,'realized_pnl',$3,$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+            [row.wallet_address,`${row.tx_hash}:realized-pnl`,row.buy_token,input.realizedPnlBaseUnits,row.tx_hash,JSON.stringify({executionId:input.id})]);
+        }
+        if(input.quoteFeeBaseUnits!==undefined&&input.quoteFeeBaseUnits!=="0"){
+          await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+            VALUES($1,$2,'fee',$3,-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
+            [row.wallet_address,`${row.tx_hash}:fee`,row.buy_token,input.quoteFeeBaseUnits,row.tx_hash,JSON.stringify({executionId:input.id})]);
+        }
       }
       await c.query("COMMIT");
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
@@ -110,7 +123,10 @@ export class PostgresExecutionStore {
   }
   /** Serialize reserve operations so concurrent withdrawals cannot overspend the same ledger balance. */
   async reserveWithdrawal(input:{id:string;accountId:string;token:string;recipient:string;amount:string;idempotencyKey:string}):Promise<{reserved:boolean}>{
-    const amount=assertPositiveBaseUnits(input.amount,"withdrawal amount");const c=await this.pool.connect();
+    const amount=assertPositiveBaseUnits(input.amount,"withdrawal amount");
+    if(!/^0x[0-9a-fA-F]{40}$/.test(input.token)||!/^0x[0-9a-fA-F]{40}$/.test(input.recipient))throw new Error("Invalid withdrawal token or recipient address.");
+    if(!input.accountId.trim()||!input.idempotencyKey.trim()||!input.id.trim())throw new Error("Withdrawal reservation identity is required.");
+    const c=await this.pool.connect();
     try{
       await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       const duplicate=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
