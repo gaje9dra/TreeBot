@@ -24,5 +24,11 @@ describe("execution authorization boundary", () => {
     expect(authorizeExecution(authorization, { ...intent, buyToken: "0x0000000000000000000000000000000000000005" }).allowed).toBe(false);
     expect(authorizeExecution(authorization, { ...intent, transactionTarget: "0x0000000000000000000000000000000000000005" }).allowed).toBe(false);
   });
+  it("rejects an exceeded aggregate daily sell limit", () => {
+    expect(authorizeExecution({...authorization, maximumDailySellAmount:"1500", dailySellAmount:"600"}, {...intent, sellAmount:"1000"}).allowed).toBe(false);
+  });
+  it("rejects emergency stop", () => {
+    expect(authorizeExecution({...authorization, emergencyStopped:true}, intent).allowed).toBe(false);
+  });
   it("keeps server-side live signing hard-disabled", () => expect(assertLiveExecutionUnavailable).toThrow(/hard-disabled/));
 });
