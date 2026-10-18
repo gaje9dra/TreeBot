@@ -57,6 +57,27 @@ describe("0x Polygon quote adapter", () => {
     await expect(adapter().getFirmQuote({ sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 51 })).rejects.toThrow(/ceiling/);
   });
 
+  it("reads the spender from the actual 0x issues.allowance object and rejects unapproved spenders", async () => {
+    const payload = fixture({ issues: { allowance: { actual: "0", spender: target } } });
+    const quote = await adapter(async () => response(payload)).getFirmQuote({
+      sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50,
+    });
+    expect(quote.allowanceTarget).toBe(target);
+
+    const unapproved = new ZeroExPolygonQuoteAdapter({
+      apiKey: "test-key",
+      allowedTokens: [{ address: sell, symbol: "A", decimals: 6 }, { address: buy, symbol: "B", decimals: 6 }],
+      allowedTransactionTargets: [target],
+      maximumSlippageBps: 50,
+      maximumPriceImpactBps: 100,
+      now: () => 1_800_000_000_000,
+      fetcher: async () => response(fixture({ issues: { allowance: { actual: "0", spender: "0x0000000000000000000000000000000000000005" } } })),
+    });
+    await expect(unapproved.getFirmQuote({
+      sellToken: sell, buyToken: buy, sellAmount: "1000000", taker, chainId: 137, slippageBps: 50,
+    })).rejects.toThrow(/Allowance spender/);
+  });
+
   it("converts base units using token decimals without conflating a price snapshot", () => {
     const quote = {
       provider: "0x" as const, chainId: 137 as const, sellToken: sell, buyToken: buy, sellAmount: 1000000n, buyAmount: 2500000n,
