@@ -21,6 +21,7 @@ contract TreeBotExecutionVault {
     error IntentAlreadyUsed();
     error InputDeltaMismatch();
     error MinimumOutputNotMet();
+    error PairMinimumRateNotMet();
     error TokenCallFailed();
     error ExternalCallFailed(bytes reason);
     error Reentrancy();
@@ -37,6 +38,8 @@ contract TreeBotExecutionVault {
     mapping(address => uint256) public dailySpendCap;
     mapping(address => mapping(uint256 => uint256)) public dailySpent;
     mapping(bytes32 => bool) public pairAllowed;
+    mapping(bytes32 => uint256) public minimumOutputRateNumerator;
+    mapping(bytes32 => uint256) public minimumOutputRateDenominator;
     mapping(address => bool) public targetAllowed;
     mapping(address => bool) public spenderAllowed;
     mapping(bytes32 => bool) public usedIntent;
@@ -46,6 +49,7 @@ contract TreeBotExecutionVault {
     event EmergencyStopChanged(bool stopped);
     event TokenPolicyChanged(address indexed token, bool allowed, uint256 maxTradeAmount, uint256 dailySpendCap);
     event PairPolicyChanged(address indexed tokenIn, address indexed tokenOut, bool allowed);
+    event PairMinimumRateChanged(address indexed tokenIn, address indexed tokenOut, uint256 numerator, uint256 denominator);
     event TargetPolicyChanged(address indexed target, bool allowed);
     event SpenderPolicyChanged(address indexed spender, bool allowed);
     event Deposit(address indexed owner, address indexed token, uint256 amount);
@@ -117,6 +121,17 @@ contract TreeBotExecutionVault {
         if (tokenIn == address(0) || tokenOut == address(0) || tokenIn == tokenOut) revert InvalidAddress();
         pairAllowed[_pairKey(tokenIn, tokenOut)] = allowed;
         emit PairPolicyChanged(tokenIn, tokenOut, allowed);
+    }
+
+    /// @notice Set a minimum output/input ratio in raw token base units for this ordered pair.
+    /// @dev Configure values using the two tokens' decimals. The executor cannot lower this policy per trade.
+    function setPairMinimumOutputRate(address tokenIn, address tokenOut, uint256 numerator, uint256 denominator) external onlyOwner {
+        if (tokenIn == address(0) || tokenOut == address(0) || tokenIn == tokenOut) revert InvalidAddress();
+        if (numerator == 0 || denominator == 0) revert InvalidPolicy();
+        bytes32 key = _pairKey(tokenIn, tokenOut);
+        minimumOutputRateNumerator[key] = numerator;
+        minimumOutputRateDenominator[key] = denominator;
+        emit PairMinimumRateChanged(tokenIn, tokenOut, numerator, denominator);
     }
 
     function setTargetAllowed(address target, bool allowed) external onlyOwner {
@@ -202,6 +217,12 @@ contract TreeBotExecutionVault {
         if (outputAfter < outputBefore || outputAfter - outputBefore < minAmountOut) revert MinimumOutputNotMet();
 
         actualAmountOut = outputAfter - outputBefore;
+        bytes32 selectedPair = _pairKey(tokenIn, tokenOut);
+        uint256 rateNumerator = minimumOutputRateNumerator[selectedPair];
+        uint256 rateDenominator = minimumOutputRateDenominator[selectedPair];
+        if (rateNumerator == 0 || rateDenominator == 0) revert InvalidPolicy();
+        // Checked multiplication intentionally reverts on overflow (fail closed).
+        if (actualAmountOut * rateDenominator < amountIn * rateNumerator) revert PairMinimumRateNotMet();
         emit SwapExecuted(intentId, tokenIn, tokenOut, amountIn, actualAmountOut, target, dayBucket);
     }
 
