@@ -242,7 +242,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       blockNumber: "700", blockHash, confirmations: 64, requiredConfirmations: 64,
     };
     const forged = { ...event, proof: {
-      chainId: 137, transactionHash: txHash, logIndex: 1, accountId, tokenAddress: token,
+      chainId: 137, transactionHash: txHash, receiptTransactionHash: txHash, receiptStatus: "success",
+      receiptBlockNumber: "700", receiptBlockHash: blockHash, logIndex: 1, accountId, tokenAddress: token,
       senderAddress: sender, recipientAddress: vault, amountBaseUnits: "1234567",
       blockNumber: "700", blockHash, tokenDecimals: 6,
     } as unknown as import("../deposit-proof").VerifiedDepositProof };
