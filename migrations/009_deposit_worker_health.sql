@@ -17,17 +17,29 @@ CREATE TABLE IF NOT EXISTS execution_worker_alerts (
   worker_key TEXT NOT NULL REFERENCES execution_worker_heartbeats(worker_key),
   alert_type TEXT NOT NULL CHECK (alert_type IN (
     'rpc_error','rpc_disagreement','scanner_stalled','uncredited_deposit',
-    'financial_incident','alert_delivery_failed','configuration_error'
+    'financial_incident','alert_delivery_failed','configuration_error','database_error'
   )),
   severity TEXT NOT NULL CHECK (severity IN ('info','warning','critical')),
   dedupe_key TEXT NOT NULL UNIQUE,
   details JSONB NOT NULL DEFAULT '{}'::jsonb,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_notified_at TIMESTAMPTZ,
   resolved_at TIMESTAMPTZ,
   acknowledged_by TEXT,
   acknowledged_at TIMESTAMPTZ
 );
+
+ALTER TABLE execution_worker_alerts
+  ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ;
+ALTER TABLE execution_worker_alerts
+  DROP CONSTRAINT IF EXISTS execution_worker_alerts_alert_type_check;
+ALTER TABLE execution_worker_alerts
+  ADD CONSTRAINT execution_worker_alerts_alert_type_check
+  CHECK (alert_type IN (
+    'rpc_error','rpc_disagreement','scanner_stalled','uncredited_deposit',
+    'financial_incident','alert_delivery_failed','configuration_error','database_error'
+  ));
 
 CREATE INDEX IF NOT EXISTS execution_worker_alerts_open_idx
   ON execution_worker_alerts(worker_key, severity, last_seen_at DESC)
