@@ -155,4 +155,30 @@ export class PostgresExecutionStore {
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
     return {matched,discrepancy:discrepancy.toString()};
   }
+
+  /** Read back durable, signed journal totals. Amounts are base units and remain strings. */
+  async getLedgerBalance(accountId:string,token:string):Promise<string>{
+    if(!accountId.trim()||!/^0x[0-9a-fA-F]{40}$/.test(token))throw new Error("Invalid ledger account or asset address.");
+    const r=await this.pool.query(
+      "SELECT COALESCE(SUM(amount_base_units),0)::text AS balance FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",
+      [accountId,token]);
+    return String(r.rows[0]?.balance??"0");
+  }
+
+  /** A balance is only considered reconciled when chain and ledger quantities match exactly. */
+  async getLatestReconciliation(walletAddress:string,token:string):Promise<{status:"matched"|"mismatch"|"unknown";discrepancy:string|null;reconciledAt:string|null}>{
+    if(!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)||!/^0x[0-9a-fA-F]{40}$/.test(token))throw new Error("Invalid reconciliation address.");
+    const r=await this.pool.query(
+      "SELECT status,discrepancy::text,reconciled_at::text FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",
+      [walletAddress,token]);
+    const row=r.rows[0];
+    if(!row)return {status:"unknown",discrepancy:null,reconciledAt:null};
+    return {status:row.status==="matched"?"matched":"mismatch",discrepancy:String(row.discrepancy),reconciledAt:String(row.reconciled_at)};
+  }
+
+  async isEmergencyStopActive():Promise<boolean>{
+    const r=await this.pool.query("SELECT emergency_stop FROM execution_control WHERE id=1");
+    return r.rows.length===0||r.rows[0].emergency_stop!==false;
+  }
+
 }
