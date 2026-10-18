@@ -92,6 +92,8 @@ export interface DepositScannerStore {
   }): Promise<void>;
 }
 
+const TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
 export interface DepositScannerConfig {
   watcherKey: string;
   startBlock: bigint;
@@ -200,9 +202,29 @@ export class PolygonDepositScanner {
       }
       // Check both the event block and current head-derived finality before a credit can be considered.
       const receipt = await this.chain.getTransactionReceipt({ hash: log.transactionHash });
-      if (receipt.transactionHash.toLowerCase() !== log.transactionHash.toLowerCase() || receipt.status !== "success" ||
-          receipt.blockNumber !== log.blockNumber) {
-        throw new DepositScannerError("Deposit candidate receipt identity, status, or block does not match the event.");
+      if (
+        receipt.transactionHash.toLowerCase() !== log.transactionHash.toLowerCase() ||
+        receipt.status !== "success" ||
+        receipt.blockNumber !== log.blockNumber ||
+        !receipt.blockHash ||
+        receipt.blockHash.toLowerCase() !== log.blockHash.toLowerCase()
+      ) {
+        throw new DepositScannerError("Deposit candidate receipt identity, status, block number, or block hash does not match the event.");
+      }
+      const receiptLog = receipt.logs.find((candidate) => candidate.logIndex === log.logIndex);
+      const expectedSenderTopic = `0x${log.senderAddress.slice(2).toLowerCase().padStart(64, "0")}`;
+      const expectedRecipientTopic = `0x${log.recipientAddress.slice(2).toLowerCase().padStart(64, "0")}`;
+      const expectedAmountData = `0x${log.amount.toString(16).padStart(64, "0")}`;
+      if (
+        !receiptLog ||
+        receiptLog.address.toLowerCase() !== log.tokenAddress.toLowerCase() ||
+        receiptLog.topics.length !== 3 ||
+        receiptLog.topics[0]?.toLowerCase() !== TRANSFER_EVENT_TOPIC ||
+        receiptLog.topics[1]?.toLowerCase() !== expectedSenderTopic ||
+        receiptLog.topics[2]?.toLowerCase() !== expectedRecipientTopic ||
+        receiptLog.data.toLowerCase() !== expectedAmountData
+      ) {
+        throw new DepositScannerError("Deposit candidate does not match the exact Transfer log at its receipt log index.");
       }
       const accountId = await this.config.accountForSender(log.senderAddress);
       if (!accountId) continue;
