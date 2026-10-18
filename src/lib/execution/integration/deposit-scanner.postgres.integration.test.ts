@@ -262,12 +262,20 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       "SELECT next_block::text FROM execution_chain_watcher_state WHERE chain_id=137 AND watcher_key=$1", [watcherKey],
     );
     expect(stateAfterForgery.rows[0].next_block).toBe("700");
+    let blockNumberCalls = 0;
+    let releaseBlockNumberBarrier!: () => void;
+    const bothScannersReady = new Promise<void>((resolve) => { releaseBlockNumberBarrier = resolve; });
     const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as const;
     const addressTopic = (address: string): Hex => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as Hex;
     const amountData = ("0x" + BigInt(event.amountBaseUnits).toString(16).padStart(64, "0")) as Hex;
     const fakeChain = {
       getChainId: async () => 137,
-      getBlockNumber: async () => 800n,
+      getBlockNumber: async () => {
+        blockNumberCalls += 1;
+        if (blockNumberCalls === 2) releaseBlockNumberBarrier();
+        await bothScannersReady;
+        return 800n;
+      },
       getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({
         number: blockNumber,
         hash: blockNumber === 700n ? blockHash : hash(Number(blockNumber)),
