@@ -67,6 +67,8 @@ contract TreeBotExecutionVaultTest {
         vault.setTokenPolicy(address(tokenIn), true, 1_000, 2_500);
         vault.setTokenPolicy(address(tokenOut), true, 10_000, 25_000);
         vault.setPairAllowed(address(tokenIn), address(tokenOut), true);
+        // Both mock tokens use identical units; owner requires at least 0.1 output base units per input base unit.
+        vault.setPairMinimumOutputRate(address(tokenIn), address(tokenOut), 1, 10);
         vault.setTargetAllowed(address(target), true);
         vault.setSpenderAllowed(address(target), true);
         vault.authorizeExecutor(EXECUTOR, uint64(START_TIME + 30 days));
@@ -111,6 +113,14 @@ contract TreeBotExecutionVaultTest {
         require(vault.balanceOf(address(tokenIn)) == beforeIn, "INPUT_NOT_ROLLED_BACK");
         require(!vault.usedIntent(bytes32(uint256(3))), "FAILED_INTENT_SHOULD_ROLL_BACK");
         require(tokenIn.allowance(address(vault), address(target)) == 0, "ALLOWANCE_NOT_ROLLED_BACK");
+    }
+
+    function testExecutorCannotLowerOwnerMinimumPairRatePerTrade() public {
+        uint256 beforeIn = vault.balanceOf(address(tokenIn));
+        vm.expectRevert(abi.encodeWithSelector(TreeBotExecutionVault.PairMinimumRateNotMet.selector));
+        _execute(bytes32(uint256(14)), 100, 1, 5);
+        require(vault.balanceOf(address(tokenIn)) == beforeIn, "INPUT_NOT_ROLLED_BACK");
+        require(!vault.usedIntent(bytes32(uint256(14))), "FAILED_INTENT_SHOULD_ROLL_BACK");
     }
 
     function testRejectsPayloadThatSpendsLessThanApprovedIntent() public {
