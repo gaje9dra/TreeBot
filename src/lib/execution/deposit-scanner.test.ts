@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Address, Hash } from "viem";
+import type { Address, Hash, Hex } from "viem";
 import {
   PolygonDepositScanner,
   type DepositRangeReader,
@@ -13,6 +13,8 @@ const token = "0x0000000000000000000000000000000000000020" as Address;
 const sender = "0x0000000000000000000000000000000000000030" as Address;
 const tx = `0x${"a".repeat(64)}` as Hash;
 const blockHash = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hash;
+const topicAddress = (address: Address) => `0x${address.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
+const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
 
 function fixture() {
   const blocks = new Map<bigint, DepositScanBlock>();
@@ -23,7 +25,11 @@ function fixture() {
   }];
   const chain: DepositRangeReader = {
     getChainId: vi.fn(async () => 137),
-    getTransactionReceipt: vi.fn(async () => { throw new Error("unused"); }),
+    getTransactionReceipt: vi.fn(async () => ({
+      transactionHash: tx, status: "success" as const, blockNumber: 100n, blockHash: blockHash(100),
+      logs: [{ address: token, data: `0x${123456n.toString(16).padStart(64, "0")}` as Hex,
+        topics: [transferTopic, topicAddress(sender), topicAddress(vault)] as [Hex, Hex, Hex], logIndex: 3 }],
+    })),
     getTransaction: vi.fn(async () => { throw new Error("unused"); }),
     getBlockNumber: vi.fn(async () => 170n),
     getBlock: vi.fn(async ({ blockNumber }) => {
@@ -81,6 +87,19 @@ describe("PolygonDepositScanner", () => {
     expect(f.getNext()).toBe(108n);
     expect(f.getLastHash()).toBe(blockHash(107));
     expect(f.observations.size).toBe(1);
+  });
+
+
+  it("rejects a candidate when the receipt log at the exact index disagrees", async () => {
+    const f = fixture();
+    (f.chain.getTransactionReceipt as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transactionHash: tx, status: "success", blockNumber: 100n, blockHash: blockHash(100),
+      logs: [{ address: token, data: `0x${123456n.toString(16).padStart(64, "0")}` as Hex,
+        topics: [transferTopic, topicAddress(sender), topicAddress(vault)] as [Hex, Hex, Hex], logIndex: 4 }],
+    });
+    await expect(f.scanner.scanOnce()).rejects.toThrow(/exact Transfer log/);
+    expect(f.store.commitScannedRange).not.toHaveBeenCalled();
+    expect(f.getNext()).toBe(100n);
   });
 
   it("rejects non-Polygon RPC", async () => {
