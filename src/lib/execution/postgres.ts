@@ -6,6 +6,7 @@ import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
 import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
 import { isIssuedWithdrawalSettlement, type VerifiedWithdrawalSettlement } from "./withdrawal-verifier";
 import { isIssuedVerifiedTradeSettlement, type VerifiedTradeSettlement } from "./trade-settlement-verifier";
+import { isIssuedVerifiedAssetValuation, type VerifiedAssetValuation } from "./valuation-verifier";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
@@ -840,6 +841,46 @@ export class PostgresExecutionStore {
       pendingTradeAccountingCount:Number(pendingRows.rows[0]?.count??0),valuationComplete,
       totalMarketValueQuoteBaseUnits,totalUnrealizedPnlQuoteBaseUnits,
     };
+  }
+
+  async recordAssetValuation(proof:VerifiedAssetValuation):Promise<{inserted:boolean}>{
+    if(!isIssuedVerifiedAssetValuation(proof))throw new Error("Asset valuation proof was not issued by the trusted dual-provider Chainlink verifier.");
+    if(!this.trustedValuationSources.has(proof.valuationSource))throw new Error("Valuation source is not in the explicit trusted-source allowlist.");
+    if(!this.accountingQuoteToken||proof.quoteAssetAddress.toLowerCase()!==this.accountingQuoteToken)throw new Error("Valuation quote asset does not match the configured canonical accounting quote token.");
+    const observedAt=new Date(proof.observedAt),freshnessDeadline=new Date(proof.freshnessDeadline);
+    if(!Number.isFinite(observedAt.getTime())||!Number.isFinite(freshnessDeadline.getTime())||freshnessDeadline.getTime()<=Date.now())
+      throw new Error("Valuation proof is malformed or already stale.");
+    const c=await this.pool.connect();
+    try{
+      await c.query("BEGIN");
+      const inserted=await c.query(
+        `INSERT INTO execution_asset_valuations(account_id,asset_address,valuation_source,quote_asset_address,price_numerator,price_denominator,token_decimals,observed_at,freshness_deadline)
+         VALUES($1,LOWER($2),$3,LOWER($4),$5::numeric,$6::numeric,$7,$8,$9)
+         ON CONFLICT(account_id,asset_address,observed_at) DO NOTHING RETURNING account_id`,
+        [proof.accountId,proof.assetAddress,proof.valuationSource,proof.quoteAssetAddress,proof.priceNumerator,proof.priceDenominator,proof.tokenDecimals,observedAt.toISOString(),freshnessDeadline.toISOString()],
+      );
+      if(inserted.rowCount===0){
+        const existing=await c.query(
+          "SELECT valuation_source,LOWER(quote_asset_address) AS quote_asset,price_numerator::text AS numerator,price_denominator::text AS denominator,token_decimals,freshness_deadline FROM execution_asset_valuations WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND observed_at=$3 FOR UPDATE",
+          [proof.accountId,proof.assetAddress,observedAt.toISOString()],
+        );
+        const row=existing.rows[0];
+        if(!row||row.valuation_source!==proof.valuationSource||row.quote_asset!==proof.quoteAssetAddress.toLowerCase()||
+          String(row.numerator)!==proof.priceNumerator||String(row.denominator)!==proof.priceDenominator||Number(row.token_decimals)!==proof.tokenDecimals||
+          new Date(row.freshness_deadline).getTime()!==freshnessDeadline.getTime()){
+          throw new Error("Conflicting immutable valuation evidence already exists for this account, asset, and observation time.");
+        }
+        await c.query("COMMIT");return {inserted:false};
+      }
+      await c.query(
+        `INSERT INTO execution_asset_valuation_evidence(account_id,asset_address,observed_at,chain_id,block_number,block_hash,
+          asset_feed_address,quote_feed_address,asset_round_id,quote_round_id,asset_answer,quote_answer,asset_feed_decimals,quote_feed_decimals,confirmations,required_confirmations)
+         VALUES($1,LOWER($2),$3,137,$4::numeric,$5,LOWER($6),LOWER($7),$8::numeric,$9::numeric,$10::numeric,$11::numeric,$12,$13,$14,$15)`,
+        [proof.accountId,proof.assetAddress,observedAt.toISOString(),proof.blockNumber,proof.blockHash,proof.assetFeedAddress,proof.quoteFeedAddress,
+          proof.assetRoundId,proof.quoteRoundId,proof.assetAnswer,proof.quoteAnswer,proof.assetFeedDecimals,proof.quoteFeedDecimals,proof.confirmations,proof.requiredConfirmations],
+      );
+      await c.query("COMMIT");return {inserted:true};
+    }catch(error){await c.query("ROLLBACK").catch(()=>undefined);throw error;}finally{c.release();}
   }
 
   async isEmergencyStopActive():Promise<boolean>{
