@@ -192,5 +192,31 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       amount: "1",
       idempotencyKey: `${prefix}-withdrawal-key`,
     })).rejects.toThrow(/emergency stop/);
+
+    // Account restrictions remain effective even if an operator mistakenly clears the
+    // global stop; this test runs only against the explicitly configured disposable DB.
+    await pool.query("INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')", [accountId,token]);
+    await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
+    await expect(executionStore.reserveWithdrawal({
+      id: `${prefix}-withdrawal-restricted`,
+      accountId,
+      token,
+      recipient: vault,
+      amount: "1",
+      idempotencyKey: `${prefix}-withdrawal-restricted-key`,
+    })).rejects.toThrow(/account financial-integrity restriction/);
+    await expect(executionStore.createOrGetIntent({
+      id: `${prefix}-restricted-intent`,
+      idempotencyKey: `${prefix}-restricted-intent-key`,
+      walletAddress: sender,
+      sellToken: token,
+      buyToken: vault,
+      sellAmount: "1",
+      quote: {},
+      authorizationId,
+      riskChecks: {},
+      preparedTransaction: {},
+    })).rejects.toThrow(/financial-integrity restriction/);
+    await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 });
