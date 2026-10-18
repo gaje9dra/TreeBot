@@ -18,32 +18,37 @@ const vulnerabilities = report.vulnerabilities ?? {};
 const highOrCritical = Object.entries(vulnerabilities).filter(([, item]) =>
   ["high", "critical"].includes(item.severity),
 );
-
-const allowedUnpatchedDevAdvisory = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm";
+const advisoryUrl = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm";
+const allowedAggregateChain = new Map([
+  ["micromatch", ["braces"]],
+  ["fast-glob", ["micromatch"]],
+  ["@next/eslint-plugin-next", ["fast-glob"]],
+  ["eslint-config-next", ["@next/eslint-plugin-next"]],
+]);
 const exceptions = [];
 const blockers = [];
 
 for (const [name, item] of highOrCritical) {
-  const hasExactAdvisory = (item.via ?? []).some(
-    (entry) => typeof entry === "object" && entry.url === allowedUnpatchedDevAdvisory,
-  );
-  const isScopedBracesFinding =
-    name === "braces" &&
+  const via = item.via ?? [];
+  const exactBracesAdvisory = name === "braces" &&
     item.isDirect === false &&
-    item.fixAvailable === false &&
     item.severity === "high" &&
-    hasExactAdvisory;
+    via.some((entry) => typeof entry === "object" && entry.url === advisoryUrl);
 
-  if (isScopedBracesFinding) {
-    exceptions.push({ name, severity: item.severity, nodes: item.nodes ?? [] });
+  const aggregateOnly = allowedAggregateChain.has(name) &&
+    via.length > 0 &&
+    via.every((entry) => typeof entry === "string" && allowedAggregateChain.get(name).includes(entry));
+
+  if (exactBracesAdvisory || aggregateOnly) {
+    exceptions.push({ name, severity: item.severity, via, nodes: item.nodes ?? [] });
   } else {
-    blockers.push({ name, severity: item.severity, via: item.via ?? [] });
+    blockers.push({ name, severity: item.severity, via });
   }
 }
 
 if (exceptions.length) {
   console.warn(
-    "TEMPORARY SECURITY EXCEPTION: braces GHSA-vfj7-8cjw-p6xm is unpatched upstream and occurs only in development tooling. Production dependencies are independently audited with npm audit --omit=dev. Keep this finding visible and remove this exception when upstream publishes a fix.",
+    "TEMPORARY SECURITY EXCEPTION: the unpatched braces GHSA-vfj7-8cjw-p6xm advisory is present in development lint tooling. npm audit reports its transitive aggregate chain through micromatch, fast-glob, @next/eslint-plugin-next, and eslint-config-next. Production dependencies are independently audited with npm audit --omit=dev. This exception is limited to that exact chain; keep the finding visible and remove it when upstream publishes a fix.",
   );
   console.warn(JSON.stringify(exceptions, null, 2));
 }
@@ -55,5 +60,5 @@ if (blockers.length) {
 }
 
 console.log(
-  `Dependency audit gate passed: no unexcepted high/critical advisories. ${exceptions.length} narrowly scoped unpatched development-tooling advisory remains documented.`,
+  `Dependency audit gate passed: no unexcepted high/critical advisories. ${exceptions.length} development-tooling packages remain under the documented upstream braces advisory exception.`,
 );

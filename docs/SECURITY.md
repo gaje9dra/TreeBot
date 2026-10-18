@@ -13,8 +13,9 @@
 ## Dependency audit posture
 
 - CI runs `npm audit --omit=dev --audit-level=high` as a hard production-dependency gate.
-- CI also audits the full dependency tree. One narrowly scoped temporary exception is retained for `braces` / GHSA-vfj7-8cjw-p6xm, a high-severity advisory with no patched upstream release as of 2026-10-18. It is pulled by development lint tooling, is not a direct dependency, and is not present in the production dependency audit.
-- The exception is identity-specific: any other high/critical advisory fails CI. The finding is printed in CI logs and must be removed once a fixed upstream release exists. Do not broaden or renew it automatically.
+- CI also audits the full dependency tree. One narrowly scoped temporary exception covers the unpatched `braces` / GHSA-vfj7-8cjw-p6xm advisory and only its known development-lint dependency chain: `braces -> micromatch -> fast-glob -> @next/eslint-plugin-next -> eslint-config-next`.
+- The advisory has no patched upstream release as of 2026-10-18. The full-tree gate allows only this exact advisory and its aggregate dependency findings; any other high/critical finding fails CI. The exception is printed in CI logs and must be removed when upstream publishes a fix. It must not be broadened or renewed automatically.
+- A passing dependency audit does not constitute a full application security review or authorize real-fund use.
 
 ## Required before real funds
 
