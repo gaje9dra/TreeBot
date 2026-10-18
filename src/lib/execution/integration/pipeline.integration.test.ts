@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Address } from "viem";
 import { PolygonExecutionReadClient } from "../evm-client";
-import { PolygonExecutionPipeline } from "../pipeline";
+import { PolygonExecutionPipeline, type ExecutionDependencies } from "../pipeline";
 import { assertLiveExecutionUnavailable } from "../authorization";
 
 const rpcUrl = process.env.TREEBOT_INTEGRATION_RPC_URL;
@@ -42,23 +42,24 @@ describe("execution safety integration boundaries", () => {
     const quoteClient = { getFirmQuote: vi.fn(async()=>q) };
     const chain = { simulateExactSwap: vi.fn(async()=>({chainId:137 as const,from:owner,to:target,data:q.transaction.data,value:0n,gasEstimate:100n})) };
     const store = {
-      createOrGetIntent: vi.fn(async(input:any)=>({created:true,record:{...input,id:input.id,status:"prepared",txHash:null,nonce:null}})),
+      createOrGetIntent: vi.fn(async(input) => ({created:true,record:{...input,id:input.id,status:"prepared" as const,txHash:null,nonce:null}})),
       recordBroadcast: vi.fn(async()=>{}),recordSubmissionUnknown:vi.fn(async()=>{}),recordSettlement:vi.fn(async()=>{}),
     };
     const loadRiskState = vi.fn()
       .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]})
       .mockResolvedValueOnce({tradingEnabled:true,emergencyStop:false,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]})
       .mockResolvedValueOnce({tradingEnabled:false,emergencyStop:true,maximumSlippageBps:10,allowedTokens:[sell,buy],allowedTargets:[target]});
-    const api = new PolygonExecutionPipeline({
-      quotes:quoteClient as any, chain:chain as any, store:store as any, loadRiskState,
+    const deps: ExecutionDependencies = {
+      quotes:quoteClient as unknown as ExecutionDependencies["quotes"], chain:chain as unknown as ExecutionDependencies["chain"], store:store as unknown as ExecutionDependencies["store"], loadRiskState,
       submitAuthorized:vi.fn(async()=>({hash:("0x"+"1".repeat(64)) as `0x${string}`,nonce:1})),
       now:()=>1_800_000_000_000,
-    });
+    };
+    const api = new PolygonExecutionPipeline(deps);
     const request = {id:"integration-test",idempotencyKey:"integration-test-key",owner,sellToken:sell,buyToken:buy,sellAmount:"10",slippageBps:10,
       authorization:{id:"auth",owner,chainId:137,allowedTokens:[sell,buy],allowedTargets:[target],maximumSellAmount:"10",
         expiresAt:2_000_000_000_000,revokedAt:null,authorizedBy:"audited_smart_account" as const}};
     const prepared = await api.prepare(request);
-    const injectedBroadcaster = (api as any).d.submitAuthorized;
+    const injectedBroadcaster = deps.submitAuthorized;
     await expect(api.submitPrepared(prepared,request)).rejects.toThrow(/paused|emergency stop/i);
     expect(injectedBroadcaster).not.toHaveBeenCalled();
   });
