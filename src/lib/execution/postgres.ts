@@ -193,3 +193,287 @@ export class PostgresExecutionStore {
   }
 
 }
+
+
+export interface DepositRangeCheckpoint {
+  nextBlock: bigint;
+  lastScannedBlockHash: `0x${string}` | null;
+}
+
+/**
+ * Partial PostgreSQL scanner-store implementation for the durable deposit watcher.
+ * This implementation fails closed when a credited deposit is later orphaned and its
+ * funds have already been allocated. It writes compensating entries and advances the
+ * checkpoint only within database transactions.
+ */
+export class PostgresDepositScannerStore {
+  constructor(private readonly pool: Pool) {}
+
+  async getOrCreateCheckpoint(input: {
+    chainId: 137;
+    watcherKey: string;
+    initialBlock: bigint;
+  }): Promise<DepositRangeCheckpoint> {
+    if (!input.watcherKey.trim() || input.initialBlock < 0n) throw new Error("Invalid deposit checkpoint configuration.");
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query(
+        `INSERT INTO execution_chain_watcher_state(chain_id,watcher_key,next_block)
+         VALUES($1,$2,$3) ON CONFLICT(chain_id,watcher_key) DO NOTHING`,
+        [input.chainId, input.watcherKey, input.initialBlock.toString()],
+      );
+      const r = await c.query(
+        `SELECT next_block::text,last_scanned_block_hash FROM execution_chain_watcher_state
+         WHERE chain_id=$1 AND watcher_key=$2 FOR UPDATE`,
+        [input.chainId, input.watcherKey],
+      );
+      const row = r.rows[0] as {next_block:string;last_scanned_block_hash:string|null}|undefined;
+      if (!row) throw new Error("Deposit scanner checkpoint was not created.");
+      await c.query("COMMIT");
+      return {nextBlock: BigInt(row.next_block), lastScannedBlockHash: row.last_scanned_block_hash as `0x${string}`|null};
+    } catch (error) {
+      await c.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+
+  async commitScannedRange(input: {
+    chainId: 137;
+    watcherKey: string;
+    expectedNextBlock: bigint;
+    nextBlock: bigint;
+    lastScannedBlockHash: `0x${string}`;
+    observations: readonly {
+      chainId: 137;
+      transactionHash: `0x${string}`;
+      logIndex: number;
+      accountId: string;
+      assetAddress: string;
+      senderAddress: string;
+      vaultAddress: string;
+      amountBaseUnits: string;
+      blockNumber: string;
+      blockHash: `0x${string}`;
+      confirmations: number;
+      requiredConfirmations: number;
+    }[];
+  }): Promise<{inserted:number;credited:number;reversed:number}> {
+    if (input.nextBlock <= input.expectedNextBlock) throw new Error("Next checkpoint must advance the scan range.");
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const checkpoint = await c.query(
+        `SELECT next_block::text FROM execution_chain_watcher_state
+         WHERE chain_id=$1 AND watcher_key=$2 FOR UPDATE`,
+        [input.chainId, input.watcherKey],
+      );
+      if (!checkpoint.rows[0] || BigInt(String(checkpoint.rows[0].next_block)) !== input.expectedNextBlock) {
+        throw new Error("Deposit checkpoint compare-and-swap failed.");
+      }
+      let inserted = 0;
+      let credited = 0;
+      for (const event of input.observations) {
+        const amount = assertPositiveBaseUnits(event.amountBaseUnits, "deposit amount");
+        const blockNumber = BigInt(event.blockNumber);
+        if (event.chainId !== 137 || event.logIndex < 0 || blockNumber < input.expectedNextBlock ||
+            blockNumber >= input.nextBlock || event.confirmations < 0 || event.requiredConfirmations < 1 ||
+            !event.accountId.trim() || !/^0x[0-9a-fA-F]{40}$/.test(event.assetAddress) ||
+            !/^0x[0-9a-fA-F]{40}$/.test(event.senderAddress) || !/^0x[0-9a-fA-F]{40}$/.test(event.vaultAddress) ||
+            !/^0x[0-9a-fA-F]{64}$/.test(event.transactionHash) || !/^0x[0-9a-fA-F]{64}$/.test(event.blockHash)) {
+          throw new Error("Invalid scanned deposit event.");
+        }
+        const status = event.confirmations >= event.requiredConfirmations ? "confirmed" : "provisional";
+        const eventKey = `deposit:137:${event.transactionHash.toLowerCase()}:${event.logIndex}`;
+        const upsert = await c.query(
+          `INSERT INTO execution_deposit_lifecycle
+             (chain_id,transaction_hash,log_index,account_id,asset_address,sender_address,vault_address,
+              amount_base_units,block_number,block_hash,status,confirmations,required_confirmations,credited_event_key,updated_at)
+           VALUES(137,$1,$2,$3,LOWER($4),LOWER($5),LOWER($6),$7,$8,$9,$10,$11,$12,NULL,NOW())
+           ON CONFLICT(chain_id,transaction_hash,log_index) DO UPDATE SET
+             confirmations=EXCLUDED.confirmations,status=CASE
+               WHEN execution_deposit_lifecycle.status='reversed' THEN 'reversed'
+               WHEN execution_deposit_lifecycle.block_hash<>EXCLUDED.block_hash THEN 'reconciliation_required'
+               ELSE EXCLUDED.status END,updated_at=NOW()
+           WHERE execution_deposit_lifecycle.account_id=EXCLUDED.account_id
+             AND execution_deposit_lifecycle.asset_address=EXCLUDED.asset_address
+             AND execution_deposit_lifecycle.amount_base_units=EXCLUDED.amount_base_units
+             AND execution_deposit_lifecycle.vault_address=EXCLUDED.vault_address
+           RETURNING (xmax=0) AS inserted,status,credited_event_key,block_hash`,
+          [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,event.assetAddress,event.senderAddress,event.vaultAddress,
+           amount.toString(),blockNumber.toString(),event.blockHash.toLowerCase(),status,event.confirmations,event.requiredConfirmations],
+        );
+        const row = upsert.rows[0] as {inserted:boolean;status:string;credited_event_key:string|null;block_hash:string}|undefined;
+        if (!row) throw new Error("Deposit event conflicts with previously recorded immutable event data.");
+        if (row.inserted) inserted++;
+        if (row.status === "reconciliation_required") throw new Error("Deposit event block hash changed; checkpoint must not advance.");
+        if (status === "confirmed" && row.status === "confirmed" && row.credited_event_key === null) {
+          const ledger = await c.query(
+            `INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+             VALUES($1,$2,'deposit',LOWER($3),$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING RETURNING event_key`,
+            [event.accountId,eventKey,event.assetAddress,amount.toString(),event.transactionHash.toLowerCase(),
+             JSON.stringify({logIndex:event.logIndex,blockNumber:event.blockNumber,blockHash:event.blockHash,scanner:input.watcherKey})],
+          );
+          if (ledger.rowCount === 1) credited++;
+          await c.query(
+            `UPDATE execution_deposit_lifecycle SET credited_event_key=$4,updated_at=NOW()
+             WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2 AND account_id=$3
+               AND credited_event_key IS NULL`,
+            [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,eventKey],
+          );
+        }
+      }
+      await c.query(
+        `UPDATE execution_chain_watcher_state SET next_block=$3,last_scanned_block_hash=$4,updated_at=NOW()
+         WHERE chain_id=$1 AND watcher_key=$2`,
+        [input.chainId,input.watcherKey,input.nextBlock.toString(),input.lastScannedBlockHash.toLowerCase()],
+      );
+      await c.query("COMMIT");
+      return {inserted,credited,reversed:0};
+    } catch (error) {
+      await c.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+
+  async listActiveDeposits(input: {
+    chainId:137;
+    watcherKey:string;
+    fromBlock:bigint;
+  }): Promise<Array<{
+    chainId:137;
+    transactionHash:`0x${string}`;
+    logIndex:number;
+    accountId:string;
+    assetAddress:Address;
+    senderAddress:Address;
+    vaultAddress:Address;
+    amountBaseUnits:string;
+    blockNumber:string;
+    blockHash:`0x${string}`;
+    confirmations:number;
+    requiredConfirmations:number;
+    status:"detected"|"provisional"|"confirmed"|"reversed"|"reconciliation_required";
+  }>> {
+    const r = await this.pool.query(
+      `SELECT d.chain_id,d.transaction_hash,d.log_index,d.account_id,d.asset_address,d.sender_address,d.vault_address,
+              d.amount_base_units::text,d.block_number::text,d.block_hash,d.confirmations,d.required_confirmations,d.status
+       FROM execution_deposit_lifecycle d
+       JOIN execution_chain_watcher_state w ON w.chain_id=d.chain_id AND w.watcher_key=$2
+       WHERE d.chain_id=$1 AND d.block_number >= $3 AND d.status IN ('detected','provisional','confirmed','reconciliation_required')
+       ORDER BY d.block_number,d.log_index`,
+      [input.chainId,input.watcherKey,input.fromBlock.toString()],
+    );
+    return r.rows.map((row) => ({
+      chainId:137 as const, transactionHash:String(row.transaction_hash) as `0x${string}`, logIndex:Number(row.log_index),
+      accountId:String(row.account_id),assetAddress:String(row.asset_address) as Address,senderAddress:String(row.sender_address) as Address,
+      vaultAddress:String(row.vault_address) as Address,amountBaseUnits:String(row.amount_base_units),blockNumber:String(row.block_number),
+      blockHash:String(row.block_hash) as `0x${string}`,confirmations:Number(row.confirmations),
+      requiredConfirmations:Number(row.required_confirmations),status:String(row.status) as "detected"|"provisional"|"confirmed"|"reversed"|"reconciliation_required",
+    }));
+  }
+
+  async reconcileOrphanedDeposits(input: {
+    chainId:137;
+    watcherKey:string;
+    orphaned:readonly {
+      transactionHash:`0x${string}`;
+      logIndex:number;
+      accountId:string;
+      assetAddress:Address;
+      amountBaseUnits:string;
+      blockNumber:string;
+      blockHash:`0x${string}`;
+      status:"detected"|"provisional"|"confirmed"|"reversed"|"reconciliation_required";
+    }[];
+    reason:string;
+  }): Promise<{reversed:number;exceptions:number}> {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      let reversed = 0, exceptions = 0;
+      for (const event of input.orphaned) {
+        const rowResult = await c.query(
+          `SELECT credited_event_key,status FROM execution_deposit_lifecycle
+           WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2 FOR UPDATE`,
+          [event.transactionHash.toLowerCase(),event.logIndex],
+        );
+        const row = rowResult.rows[0] as {credited_event_key:string|null;status:string}|undefined;
+        if (!row) continue;
+        if (row.credited_event_key) {
+          const existing = await c.query(
+            `SELECT amount_base_units::text FROM execution_ledger_entries WHERE event_key=$1`,
+            [row.credited_event_key],
+          );
+          const amount = BigInt(String(existing.rows[0]?.amount_base_units ?? event.amountBaseUnits));
+          const balance = await c.query(
+            `SELECT COALESCE(SUM(amount_base_units),0)::text AS total FROM execution_ledger_entries
+             WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)`,
+            [event.accountId,event.assetAddress],
+          );
+          if (BigInt(String(balance.rows[0]?.total ?? "0")) >= amount) {
+            await c.query(
+              `INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+               VALUES($1,$2,'position_adjustment',LOWER($3),-$4::numeric,137,$5,$6::jsonb)
+               ON CONFLICT(event_key) DO NOTHING`,
+              [event.accountId,`reversal:${row.credited_event_key}`,event.assetAddress,amount.toString(),event.transactionHash.toLowerCase(),
+               JSON.stringify({reason,orphanedBlock:event.blockNumber,orphanedBlockHash:event.blockHash,watcher:input.watcherKey})],
+            );
+            await c.query(
+              `UPDATE execution_deposit_lifecycle SET status='reversed',reversed_at=NOW(),updated_at=NOW()
+               WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
+              [event.transactionHash.toLowerCase(),event.logIndex],
+            );
+            reversed++;
+          } else {
+            await c.query(
+              `UPDATE execution_deposit_lifecycle SET status='reconciliation_required',updated_at=NOW()
+               WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
+              [event.transactionHash.toLowerCase(),event.logIndex],
+            );
+            await c.query(
+              `INSERT INTO execution_audit_events(event_type,details) VALUES('orphaned_deposit_allocated',$1::jsonb)`,
+              [JSON.stringify({accountId:event.accountId,assetAddress:event.assetAddress,txHash:event.transactionHash,logIndex:event.logIndex,reason})],
+            );
+            await c.query("UPDATE execution_control SET emergency_stop=TRUE,mismatch_detected_at=NOW(),updated_at=NOW() WHERE id=1");
+            exceptions++;
+          }
+        } else {
+          await c.query(
+            `UPDATE execution_deposit_lifecycle SET status='reversed',reversed_at=NOW(),updated_at=NOW()
+             WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
+            [event.transactionHash.toLowerCase(),event.logIndex],
+          );
+          reversed++;
+        }
+      }
+      await c.query("COMMIT");
+      return {reversed,exceptions};
+    } catch (error) {
+      await c.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
+
+  async rewindCheckpoint(input: {
+    chainId:137;
+    watcherKey:string;
+    expectedNextBlock:bigint;
+    nextBlock:bigint;
+    lastScannedBlockHash:`0x${string}`|null;
+  }):Promise<void> {
+    if(input.nextBlock<0n||input.nextBlock>input.expectedNextBlock)throw new Error("Invalid checkpoint rewind.");
+    const r = await this.pool.query(
+      `UPDATE execution_chain_watcher_state SET next_block=$4,last_scanned_block_hash=$5,updated_at=NOW()
+       WHERE chain_id=$1 AND watcher_key=$2 AND next_block=$3 RETURNING next_block`,
+      [input.chainId,input.watcherKey,input.expectedNextBlock.toString(),input.nextBlock.toString(),input.lastScannedBlockHash],
+    );
+    if(r.rowCount!==1)throw new Error("Deposit checkpoint rewind compare-and-swap failed.");
+  }
+}
