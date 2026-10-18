@@ -278,7 +278,7 @@ export class PostgresExecutionStore {
       const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
       if(["confirmed","reverted"].includes(String(row.status))){
         const same=String(row.transaction_hash).toLowerCase()===proof.transactionHash.toLowerCase()&&
-          String(row.confirmation_block)===proof.blockNumber&&String(row.confirmation_block_hash).toLowerCase()===proof.blockHash.toLowerCase()&&
+          Number(row.nonce)===proof.nonce&&String(row.confirmation_block)===proof.blockNumber&&String(row.confirmation_block_hash).toLowerCase()===proof.blockHash.toLowerCase()&&
           row.settlement_status===proof.status&&String(row.settlement_actual_amount)===proof.actualAmountBaseUnits&&String(row.settlement_gas_wei)===proof.gasWei;
         if(!same)throw new Error("Conflicting settlement proof for an already terminal withdrawal.");
         await c.query("COMMIT");return {settled:false,status:proof.status};
@@ -288,6 +288,7 @@ export class PostgresExecutionStore {
         String(row.asset_address).toLowerCase()!==proof.tokenAddress.toLowerCase()||
         String(row.recipient_address).toLowerCase()!==proof.recipientAddress.toLowerCase()||
         String(row.amount_base_units)!==proof.reservedAmountBaseUnits||
+        (row.nonce!==null&&Number(row.nonce)!==proof.nonce)||
         (row.transaction_hash&&String(row.transaction_hash).toLowerCase()!==proof.transactionHash.toLowerCase())){
         throw new Error("Settlement proof does not match the immutable withdrawal reservation.");
       }
@@ -302,7 +303,7 @@ export class PostgresExecutionStore {
         settlement_status=$2,settlement_evidence=$8::jsonb,settlement_verified_at=NOW(),settled_at=NOW(),
         failure_reason=CASE WHEN $2='reverted' THEN 'On-chain withdrawal reverted; principal was not debited.' ELSE NULL END,updated_at=NOW()
         WHERE id=$1`,[proof.withdrawalId,nextStatus,proof.transactionHash.toLowerCase(),proof.blockNumber,proof.blockHash,
-        proof.actualAmountBaseUnits,proof.gasWei,evidence]);
+        proof.actualAmountBaseUnits,proof.gasWei,evidence,proof.nonce]);
       if(proof.status==="confirmed"){
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
           VALUES($1,$2,'withdrawal',LOWER($3),-$4::numeric,137,$5,$6::jsonb)`,
@@ -316,7 +317,7 @@ export class PostgresExecutionStore {
       }
       await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,transaction_hash,nonce,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
         [proof.withdrawalId,String(row.status),nextStatus,"withdrawal:"+proof.withdrawalId+":settled:"+proof.transactionHash.toLowerCase(),
-          proof.transactionHash.toLowerCase(),row.nonce,evidence]);
+          proof.transactionHash.toLowerCase(),proof.nonce,evidence]);
       await c.query("COMMIT");return {settled:true,status:proof.status};
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
