@@ -13,6 +13,7 @@ const token = "0x0000000000000000000000000000000000000020" as Address;
 const sender = "0x0000000000000000000000000000000000000030" as Address;
 const hashSeed = BigInt(Date.now()) * 1_000_000n + BigInt(process.pid);
 const hash = (n: number) => `0x${(hashSeed + BigInt(n)).toString(16).padStart(64, "0")}` as Hash;
+const integrationWallet = ("0x" + (hashSeed + 6000n).toString(16).padStart(40, "0").slice(-40)) as Address;
 
 let pool: Pool;
 let store: PostgresDepositScannerStore;
@@ -31,7 +32,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await pool.query("DELETE FROM execution_withdrawal_reservations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
-    await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1 OR LOWER(wallet_address) IN (LOWER($2),LOWER($3))", [`${prefix}%`, "0x0000000000000000000000000000000000000040", integrationWallet]);
     await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_authorizations WHERE id LIKE $1", [`${prefix}%`]);
@@ -400,6 +401,57 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       [accountId, successHash, revertedHash],
     );
     expect(gasEntries.rows.map((row) => row.amount_base_units)).toEqual(["-3000000", "-1600000"]);
+    await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+  });
+
+
+  it("prevents a trade and withdrawal from reserving the same balance concurrently", async () => {
+    const wallet = integrationWallet;
+    const buyToken = "0x0000000000000000000000000000000000000080" as Address;
+    const recipient = "0x0000000000000000000000000000000000000090" as Address;
+    const executionStore = new PostgresExecutionStore(pool);
+    await pool.query(
+      "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
+      [wallet, prefix + "-trade-withdrawal-funding", token, hash(910)],
+    );
+    await pool.query(
+      "INSERT INTO execution_reconciliation(wallet_address,token_address,chain_balance,ledger_balance,discrepancy,status) VALUES($1,$2,1000,1000,0,'matched')",
+      [wallet, token],
+    );
+    await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
+    const trade = executionStore.createOrGetIntent({
+      id: prefix + "-trade-race",
+      idempotencyKey: prefix + "-trade-race-key",
+      walletAddress: wallet,
+      sellToken: token,
+      buyToken,
+      sellAmount: "700",
+      quote: { provider: "test", sellAmount: "700" },
+      authorizationId: prefix + "-trade-auth",
+      riskChecks: { passed: true },
+      preparedTransaction: { to: recipient, data: "0x", value: "0" },
+    });
+    const withdrawal = executionStore.reserveWithdrawal({
+      id: prefix + "-withdrawal-race",
+      accountId: wallet,
+      sourceAddress: wallet,
+      token,
+      recipient,
+      amount: "700",
+      idempotencyKey: prefix + "-withdrawal-race-key",
+    });
+    const results = await Promise.allSettled([trade, withdrawal]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const heldTrades = await pool.query(
+      "SELECT COALESCE(SUM(sell_amount),0)::text AS amount FROM execution_transactions WHERE wallet_address=$1 AND sell_token=$2 AND status IN ('prepared','signed','submitted','pending','unknown','replaced')",
+      [wallet, token],
+    );
+    const heldWithdrawals = await pool.query(
+      "SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_withdrawal_reservations WHERE account_id=$1 AND asset_address=$2 AND status IN ('reserved','submitting','submitted','unknown')",
+      [wallet, token],
+    );
+    expect(BigInt(heldTrades.rows[0].amount) + BigInt(heldWithdrawals.rows[0].amount)).toBe(700n);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 
