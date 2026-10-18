@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
 import type { Address, Hash, Hex } from "viem";
 import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres";
 import { PolygonDepositScanner, type DepositRangeReader } from "../deposit-scanner";
 import { verifyWithdrawalSettlement, type WithdrawalChainReader } from "../withdrawal-verifier";
+import { parseDepositWorkerSettings, runDepositWorker } from "../deposit-worker";
 
 const enabled = process.env.TREEBOT_RUN_POSTGRES_INTEGRATION === "true";
 const describePostgres = enabled ? describe : describe.skip;
@@ -28,6 +29,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
   afterAll(async () => {
     if (!pool) return;
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+    await pool.query("DELETE FROM execution_worker_alerts WHERE worker_key LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_worker_heartbeats WHERE worker_key LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_withdrawal_audit_events WHERE withdrawal_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_withdrawal_reservations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
@@ -465,6 +468,52 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     );
     expect(BigInt(heldTrades.rows[0].amount) + BigInt(heldWithdrawals.rows[0].amount)).toBe(700n);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+  });
+
+
+  it("records supervised worker heartbeats and persists incident alerts", async () => {
+    const workerKey = prefix + "-worker-health";
+    const settings = parseDepositWorkerSettings({
+      TREEBOT_DEPOSIT_WATCHER_KEY: workerKey,
+      POLYGON_RPC_URL: "https://polygon-primary.example.test/rpc",
+      POLYGON_RPC_FALLBACK_URL: "https://polygon-fallback.example.test/rpc",
+      TREEBOT_DEPOSIT_VAULT_ADDRESS: vault,
+      TREEBOT_DEPOSIT_TOKENS_JSON: JSON.stringify([token]),
+      TREEBOT_DEPOSIT_TOKEN_DECIMALS_JSON: JSON.stringify({ [token]: 6 }),
+      TREEBOT_DEPOSIT_SENDER_MAP_JSON: JSON.stringify({ [sender]: prefix + "-worker-account" }),
+      TREEBOT_DEPOSIT_START_BLOCK: "100",
+      TREEBOT_DEPOSIT_ALERT_WEBHOOK: "https://alerts.example.test/treebot",
+      TREEBOT_DEPOSIT_CONFIRMATIONS: "64",
+      TREEBOT_DEPOSIT_MAX_BLOCK_RANGE: "100",
+      TREEBOT_DEPOSIT_POLL_INTERVAL_MS: "10000",
+      TREEBOT_DEPOSIT_STALL_AFTER_MS: "120000",
+    });
+    const reader = {
+      getChainId: async () => 137,
+      getBlockNumber: async () => 1000n,
+      getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({
+        number: blockNumber, hash: hash(Number(blockNumber)), parentHash: hash(Number(blockNumber - 1n)),
+      }),
+    } as unknown as DepositRangeReader;
+    let stopChecks = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200 })));
+    try {
+      await runDepositWorker({
+        pool,
+        settings,
+        scanner: { scanOnce: async () => ({ fromBlock: "100", toBlock: "100", inserted: 0, credited: 0, reversed: 0 }) } as unknown as PolygonDepositScanner,
+        primary: reader,
+        fallback: reader,
+        shouldStop: () => stopChecks++ > 0,
+        sleep: async () => undefined,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const heartbeat = await pool.query("SELECT status,last_success_at IS NOT NULL AS has_success,last_scanned_block::text,consecutive_errors FROM execution_worker_heartbeats WHERE worker_key=$1",[workerKey]);
+    expect(heartbeat.rows[0]).toEqual({ status: "stopped", has_success: true, last_scanned_block: "100", consecutive_errors: 0 });
+    const alerts = await pool.query("SELECT alert_type,severity FROM execution_worker_alerts WHERE worker_key=$1",[workerKey]);
+    expect(alerts.rows).toContainEqual({ alert_type: "financial_incident", severity: "critical" });
   });
 
 });
