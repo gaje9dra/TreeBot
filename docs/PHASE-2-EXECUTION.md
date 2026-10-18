@@ -34,3 +34,8 @@ Official 0x references:
 - https://docs.0x.org/docs/introduction/api-issues
 - https://docs.0x.org/docs/introduction/quickstart/swap-tokens-with-0x-swap-api
 - https://docs.0x.org/docs/core-concepts/contracts
+
+
+## Phase 2.4B durable lifecycle schema (not activated)
+
+Migration `004_fund_lifecycle.sql` adds persistent watcher checkpoints, per-log deposit states including reorg reversal/reconciliation states, withdrawal lifecycle audit records and nonce/settlement fields, and exact-integer valuation/open-position records. It is intentionally a schema foundation only: schema presence does not implement a production scanner or proof authority. The current `PostgresExecutionStore.recordDepositEvent` rejects all direct credit attempts. No deposit credit may be enabled until a server-side RPC scanner independently verifies canonical block hashes, receipt status, configured token and vault mappings, event identity, finality and reorgs and only then atomically inserts journal events. Likewise, withdrawals remain reserve-only; a signer, transaction submission/replacement monitor, receipt-driven settlement and recovery worker are not implemented. The schema has not been applied to a PostgreSQL instance in this environment.
