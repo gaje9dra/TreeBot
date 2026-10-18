@@ -1,4 +1,4 @@
-import { loadEnvConfig } from "next/env";
+import { loadEnvConfig } from "@next/env";
 import { readFileSync } from "node:fs";
 import { createLedgerPool } from "../src/lib/ledger/postgres";
 
