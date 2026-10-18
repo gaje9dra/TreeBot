@@ -17,7 +17,7 @@ export interface WithdrawalReceipt {
 export interface WithdrawalChainReader {
   getChainId(): Promise<number>;
   getTransactionReceipt(args: { hash: Hash }): Promise<WithdrawalReceipt>;
-  getTransaction(args: { hash: Hash }): Promise<{ hash: Hash; from: Address; to: Address | null }>;
+  getTransaction(args: { hash: Hash }): Promise<{ hash: Hash; from: Address; to: Address | null; nonce: number }>;
   getBlockNumber(): Promise<bigint>;
   getBlock(args: { blockNumber: bigint }): Promise<{ number: bigint; hash: Hash; parentHash: Hash }>;
 }
@@ -26,6 +26,7 @@ export interface VerifiedWithdrawalSettlement {
   readonly withdrawalId: string;
   readonly chainId: 137;
   readonly transactionHash: Hash;
+  readonly nonce: number;
   readonly status: "confirmed" | "reverted";
   readonly sourceAddress: Address;
   readonly tokenAddress: Address;
@@ -48,6 +49,7 @@ function issueSettlementProof(input: VerifiedWithdrawalSettlement): VerifiedWith
     !proof.withdrawalId.trim() ||
     proof.chainId !== 137 ||
     !/^0x[0-9a-fA-F]{64}$/.test(proof.transactionHash) ||
+    !Number.isSafeInteger(proof.nonce) || proof.nonce < 0 ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.sourceAddress) ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.tokenAddress) ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.recipientAddress) ||
@@ -114,6 +116,7 @@ export async function verifyWithdrawalSettlement(
     throw new Error("RPC returned a mismatched withdrawal transaction identity.");
   }
   if (receipt.blockNumber === null || !receipt.blockHash) throw new Error("Withdrawal receipt is not mined.");
+  if (!Number.isSafeInteger(transaction.nonce) || transaction.nonce < 0) throw new Error("Withdrawal transaction nonce is invalid.");
   if (getAddress(transaction.from) !== source || transaction.to === null || getAddress(transaction.to) !== token) {
     throw new Error("Withdrawal transaction source or token contract does not match the reservation.");
   }
@@ -124,7 +127,7 @@ export async function verifyWithdrawalSettlement(
   const confirmationsBig = currentBlock >= receipt.blockNumber ? currentBlock - receipt.blockNumber + 1n : 0n;
   const confirmations = Number(confirmationsBig > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : confirmationsBig);
   if (confirmations < required) throw new Error("Withdrawal receipt has not reached the configured finality threshold.");
-  if (receipt.gasUsed < 0n || receipt.effectiveGasPrice < 0n) throw new Error("Withdrawal receipt gas accounting is invalid.");
+  if (typeof receipt.gasUsed !== "bigint" || typeof receipt.effectiveGasPrice !== "bigint" || receipt.gasUsed < 0n || receipt.effectiveGasPrice < 0n) throw new Error("Withdrawal receipt gas accounting is invalid.");
 
   const matches: number[] = [];
   for (const log of receipt.logs) {
@@ -150,6 +153,7 @@ export async function verifyWithdrawalSettlement(
     withdrawalId: request.withdrawalId,
     chainId: 137,
     transactionHash,
+    nonce: transaction.nonce,
     status: receipt.status === "success" ? "confirmed" : "reverted",
     sourceAddress: source,
     tokenAddress: token,
