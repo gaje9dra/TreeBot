@@ -59,7 +59,7 @@ describe("0x Polygon quote adapter", () => {
 
   it("converts base units using token decimals without conflating a price snapshot", () => {
     const quote = {
-      provider: "0x" as const, chainId: 137, sellToken: sell, buyToken: buy, sellAmount: 1000000n, buyAmount: 2500000n,
+      provider: "0x" as const, chainId: 137 as const, sellToken: sell, buyToken: buy, sellAmount: 1000000n, buyAmount: 2500000n,
       minBuyAmount: 2487500n, taker, allowanceTarget: null,
       transaction: { to: target, data: "0x12345678" as `0x${string}`, value: 0n },
       liquiditySources: [], estimatedGas: null, quoteTimestamp: 1, priceImpactBps: null, slippageBps: 50, rawFeeAmounts: [],
