@@ -84,7 +84,7 @@ export class PostgresExecutionStore {
       }
 
       const ledger=await c.query(
-        "SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",
+        "SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND entry_type <> 'realized_pnl'",
         [input.walletAddress,input.sellToken],
       );
       const inventory=await c.query("SELECT COALESCE(quantity_base_units,0)::text AS amount FROM execution_position_inventory WHERE chain_id=137 AND LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[input.walletAddress,input.sellToken]);
@@ -366,7 +366,7 @@ export class PostgresExecutionStore {
         }
 
         const reconcileAsset=async(asset:string,inventoryQuantity:string)=>{
-          const ledger=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[accountId,asset]);
+          const ledger=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND entry_type <> 'realized_pnl'",[accountId,asset]);
           const ledgerQuantity=BigInt(ledger.rows[0]?.quantity??"0"), inventory=BigInt(inventoryQuantity);
           const discrepancy=ledgerQuantity-inventory;
           await c.query(
@@ -475,7 +475,7 @@ export class PostgresExecutionStore {
       if(restriction.rowCount)throw new Error("Withdrawal blocked by an active account financial-integrity restriction.");
       const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.sourceAddress,input.token]);
       if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
-      const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
+      const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND entry_type <> 'realized_pnl'",[input.accountId,input.token]);
       const inventory=await c.query("SELECT COALESCE(quantity_base_units,0)::text AS v FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
       const ledgerAmount=BigInt(balance.rows[0]?.v??"0");
       const inventoryAmount=BigInt(inventory.rows[0]?.v??"0");
@@ -623,7 +623,7 @@ export class PostgresExecutionStore {
         );
         const inventoryQ=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[row.account_id,row.asset_address]);
         const inventoryQuantity=BigInt(inventoryQ.rows[0]?.quantity??"0");
-        const ledgerQ=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[row.account_id,row.asset_address]);
+        const ledgerQ=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND entry_type <> 'realized_pnl'",[row.account_id,row.asset_address]);
         const ledgerQuantity=BigInt(ledgerQ.rows[0]?.quantity??"0");
         const discrepancy=ledgerQuantity-inventoryQuantity;
         await c.query(
@@ -690,7 +690,7 @@ export class PostgresExecutionStore {
   async getLedgerBalance(accountId:string,token:string):Promise<string>{
     if(!accountId.trim()||!/^0x[0-9a-fA-F]{40}$/.test(token))throw new Error("Invalid ledger account or asset address.");
     const r=await this.pool.query(
-      "SELECT COALESCE(SUM(amount_base_units),0)::text AS balance FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",
+      "SELECT COALESCE(SUM(amount_base_units),0)::text AS balance FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND entry_type <> 'realized_pnl'",
       [accountId,token]);
     return String(r.rows[0]?.balance??"0");
   }
