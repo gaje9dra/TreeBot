@@ -13,7 +13,14 @@ describe("configuration safety", () => {
     expect(() => loadConfig({ NEXT_PUBLIC_CHAIN_ID: "1" })).toThrow();
     expect(() => loadConfig({ TREEBOT_TRADING_MODE: "live" })).toThrow();
   });
-  it("never permits deposits even if explicitly requested", () => {
+  it("keeps deposits hard-disabled until the release gate and operator prerequisites are approved", () => {
     expect(() => loadConfig({ TREEBOT_DEPOSITS_ENABLED: "true" })).toThrow(/Deposits are disabled/);
+    expect(() => loadConfig({
+      TREEBOT_DEPOSITS_ENABLED: "true",
+      TREEBOT_DEPOSITS_OPERATOR_APPROVED: "true",
+      TREEBOT_DEPOSITS_SECURITY_REVIEWED: "true",
+      TREEBOT_DEPOSITS_NETWORK_VERIFIED: "true",
+      TREEBOT_DEPOSIT_ALERT_WEBHOOK: "https://alerts.example.test/treebot",
+    })).toThrow(/Deposits are disabled in this build/);
   });
 });
