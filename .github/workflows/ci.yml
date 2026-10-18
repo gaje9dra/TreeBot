@@ -7,13 +7,34 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: treebot-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  bootstrap-lockfile:
+    name: Bootstrap dependency lockfile (one-time)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/') && !hashFiles('package-lock.json')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate lockfile from the committed package manifest
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Commit generated lockfile to the feature branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "build: commit reproducible npm lockfile"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
   contract-tests:
     name: Foundry local EVM contract tests
     runs-on: ubuntu-latest
@@ -38,15 +59,12 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
-      - name: Upload generated lockfile for one-time bootstrap
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/')
-        uses: actions/upload-artifact@v4
-        with:
-          name: treebot-generated-package-lock
-          path: package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+        run: |
+          if [ -s package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
       - name: Apply repository formatting
         run: npx prettier --write .
       - name: Verify formatting
@@ -83,7 +101,12 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -s package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Audit full dependency tree
