@@ -1,4 +1,4 @@
-import { loadEnvConfig } from "next/env";
+import { loadEnvConfig } from "@next/env";
 import { createLedgerPool, PostgresPaperLedger } from "@/lib/ledger/postgres";
 import { runPaperCycle } from "@/lib/worker/paper-cycle";
 
