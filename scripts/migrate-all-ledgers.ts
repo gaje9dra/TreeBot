@@ -15,6 +15,7 @@ const migrations = [
   "migrations/006_account_restrictions.sql",
   "migrations/007_proof_bearing_deposit_credit.sql",
   "migrations/008_withdrawal_settlement.sql",
+  "migrations/009_deposit_worker_health.sql",
 ];
 
 async function main() {
