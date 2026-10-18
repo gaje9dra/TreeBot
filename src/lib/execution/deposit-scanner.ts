@@ -271,12 +271,13 @@ export class PolygonDepositScanner {
       ) {
         throw new DepositScannerError("Deposit candidate does not match the exact Transfer log at its receipt log index.");
       }
-      const accountId = await this.config.accountForSender(log.senderAddress);
-      if (!accountId) continue;
+      const mappedAccountId = await this.config.accountForSender(log.senderAddress);
+      // Persist an unmapped, non-creditable observation so operations can alert and reconcile it.
+      const accountId = mappedAccountId ?? "unmapped:" + log.senderAddress.toLowerCase();
       const confirmationsBig = current >= log.blockNumber ? current - log.blockNumber + 1n : 0n;
       const confirmations = Number(confirmationsBig > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : confirmationsBig);
       const tokenDecimals = Object.entries(this.config.tokenDecimalsByAddress ?? {}).find(([address]) => address.toLowerCase() === log.tokenAddress.toLowerCase())?.[1];
-      const proof = tokenDecimals === undefined ? undefined : issueVerifiedDepositProof({
+      const proof = tokenDecimals === undefined || !mappedAccountId ? undefined : issueVerifiedDepositProof({
         chainId: 137,
         transactionHash: log.transactionHash,
         receiptTransactionHash: receipt.transactionHash,
@@ -284,7 +285,7 @@ export class PolygonDepositScanner {
         receiptBlockNumber: receipt.blockNumber!.toString(),
         receiptBlockHash: receipt.blockHash!,
         logIndex: log.logIndex,
-        accountId,
+        accountId: mappedAccountId,
         tokenAddress: log.tokenAddress,
         senderAddress: log.senderAddress,
         recipientAddress: this.config.vaultAddress,
