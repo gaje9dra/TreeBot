@@ -71,7 +71,7 @@ export function evaluateOpportunity(input: EvaluateInput): TradeDecision {
   const netBps = grossBps - totalCostBps;
 
   // Entry controls must never prevent a risk-reducing exit from closing an existing long.
-  if (direction === "buy") {
+  if (direction !== "sell") {
     if (portfolio.availableQuote <= 0) reasons.push("No positive available portfolio equity.");
     if (dailyLoss >= limits.maximumDailyLossPercent) reasons.push("Maximum daily loss limit reached.");
     if (drawdown >= limits.maximumDrawdownPercent) reasons.push("Maximum portfolio drawdown limit reached.");
