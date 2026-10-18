@@ -38,12 +38,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: |
-          if [ -s package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+        run: npm install
       - name: Apply repository formatting
         run: npx prettier --write .
       - name: Verify formatting
@@ -80,12 +75,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: |
-          if [ -s package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+        run: npm install
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Audit full dependency tree
