@@ -188,6 +188,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await expect(executionStore.reserveWithdrawal({
       id: `${prefix}-withdrawal`,
       accountId,
+      sourceAddress: sender,
       token,
       recipient: vault,
       amount: "1",
@@ -201,6 +202,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await expect(executionStore.reserveWithdrawal({
       id: `${prefix}-withdrawal-restricted`,
       accountId,
+      sourceAddress: sender,
       token,
       recipient: vault,
       amount: "1",
