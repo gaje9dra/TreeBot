@@ -63,3 +63,17 @@ CREATE TABLE IF NOT EXISTS execution_withdrawal_reservations (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS execution_withdrawal_account_status_idx ON execution_withdrawal_reservations(account_id,status);
+
+-- Keep ledger reconciliation failures fail-closed even if callers miss the result.
+CREATE OR REPLACE FUNCTION treebot_freeze_on_execution_mismatch() RETURNS trigger AS $$
+BEGIN
+  IF NEW.status = 'mismatch' THEN
+    UPDATE execution_control SET emergency_stop = TRUE, mismatch_detected_at = NOW(), updated_at = NOW() WHERE id = 1;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS execution_reconciliation_freeze_trigger ON execution_reconciliation;
+CREATE TRIGGER execution_reconciliation_freeze_trigger
+AFTER INSERT ON execution_reconciliation
+FOR EACH ROW EXECUTE FUNCTION treebot_freeze_on_execution_mismatch();
