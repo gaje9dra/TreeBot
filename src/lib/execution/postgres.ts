@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { Address } from "viem";
+import type { DepositLifecycleRecord, DepositScannerStore } from "./deposit-scanner";
 import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
 
@@ -207,7 +208,7 @@ export interface DepositRangeCheckpoint {
  * funds have already been allocated. It writes compensating entries and advances the
  * checkpoint only within database transactions.
  */
-export class PostgresDepositScannerStore {
+export class PostgresDepositScannerStore implements DepositScannerStore {
   constructor(private readonly pool: Pool) {}
 
   async getOrCreateCheckpoint(input: {
@@ -275,7 +276,7 @@ export class PostgresDepositScannerStore {
         throw new Error("Deposit checkpoint compare-and-swap failed.");
       }
       let inserted = 0;
-      let credited = 0;
+      const credited = 0;
       for (const event of input.observations) {
         const amount = assertPositiveBaseUnits(event.amountBaseUnits, "deposit amount");
         const blockNumber = BigInt(event.blockNumber);
@@ -287,44 +288,31 @@ export class PostgresDepositScannerStore {
           throw new Error("Invalid scanned deposit event.");
         }
         const status = event.confirmations >= event.requiredConfirmations ? "confirmed" : "provisional";
-        const eventKey = `deposit:137:${event.transactionHash.toLowerCase()}:${event.logIndex}`;
         const upsert = await c.query(
           `INSERT INTO execution_deposit_lifecycle
-             (chain_id,transaction_hash,log_index,account_id,asset_address,sender_address,vault_address,
+             (chain_id,watcher_key,transaction_hash,log_index,account_id,asset_address,sender_address,vault_address,
               amount_base_units,block_number,block_hash,status,confirmations,required_confirmations,credited_event_key,updated_at)
-           VALUES(137,$1,$2,$3,LOWER($4),LOWER($5),LOWER($6),$7,$8,$9,$10,$11,$12,NULL,NOW())
+           VALUES(137,$1,$2,$3,$4,LOWER($5),LOWER($6),LOWER($7),$8,$9,$10,$11,$12,$13,NULL,NOW())
            ON CONFLICT(chain_id,transaction_hash,log_index) DO UPDATE SET
              confirmations=EXCLUDED.confirmations,status=CASE
                WHEN execution_deposit_lifecycle.status='reversed' THEN 'reversed'
                WHEN execution_deposit_lifecycle.block_hash<>EXCLUDED.block_hash THEN 'reconciliation_required'
                ELSE EXCLUDED.status END,updated_at=NOW()
-           WHERE execution_deposit_lifecycle.account_id=EXCLUDED.account_id
+           WHERE execution_deposit_lifecycle.watcher_key=EXCLUDED.watcher_key
+             AND execution_deposit_lifecycle.account_id=EXCLUDED.account_id
              AND execution_deposit_lifecycle.asset_address=EXCLUDED.asset_address
              AND execution_deposit_lifecycle.amount_base_units=EXCLUDED.amount_base_units
              AND execution_deposit_lifecycle.vault_address=EXCLUDED.vault_address
            RETURNING (xmax=0) AS inserted,status,credited_event_key,block_hash`,
-          [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,event.assetAddress,event.senderAddress,event.vaultAddress,
+          [input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex,event.accountId,event.assetAddress,event.senderAddress,event.vaultAddress,
            amount.toString(),blockNumber.toString(),event.blockHash.toLowerCase(),status,event.confirmations,event.requiredConfirmations],
         );
         const row = upsert.rows[0] as {inserted:boolean;status:string;credited_event_key:string|null;block_hash:string}|undefined;
         if (!row) throw new Error("Deposit event conflicts with previously recorded immutable event data.");
         if (row.inserted) inserted++;
         if (row.status === "reconciliation_required") throw new Error("Deposit event block hash changed; checkpoint must not advance.");
-        if (status === "confirmed" && row.status === "confirmed" && row.credited_event_key === null) {
-          const ledger = await c.query(
-            `INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-             VALUES($1,$2,'deposit',LOWER($3),$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING RETURNING event_key`,
-            [event.accountId,eventKey,event.assetAddress,amount.toString(),event.transactionHash.toLowerCase(),
-             JSON.stringify({logIndex:event.logIndex,blockNumber:event.blockNumber,blockHash:event.blockHash,scanner:input.watcherKey})],
-          );
-          if (ledger.rowCount === 1) credited++;
-          await c.query(
-            `UPDATE execution_deposit_lifecycle SET credited_event_key=$4,updated_at=NOW()
-             WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2 AND account_id=$3
-               AND credited_event_key IS NULL`,
-            [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,eventKey],
-          );
-        }
+        // Observations never authorize spendable credits. Deposits remain fail-closed until
+        // allocation-aware crediting and PostgreSQL recovery verification are complete.
       }
       await c.query(
         `UPDATE execution_chain_watcher_state SET next_block=$3,last_scanned_block_hash=$4,updated_at=NOW()
@@ -340,4 +328,112 @@ export class PostgresDepositScannerStore {
       c.release();
     }
   }
+  async listActiveDeposits(input: {
+    chainId: 137;
+    watcherKey: string;
+    fromBlock: bigint;
+  }): Promise<DepositLifecycleRecord[]> {
+    const result = await this.pool.query(
+      `SELECT transaction_hash,log_index,account_id,asset_address,sender_address,vault_address,
+              amount_base_units::text,block_number::text,block_hash,confirmations,required_confirmations,status
+       FROM execution_deposit_lifecycle
+       WHERE chain_id=$1 AND watcher_key=$2 AND block_number >= $3
+         AND status IN ('detected','provisional','confirmed','reconciliation_required')
+       ORDER BY block_number,log_index`,
+      [input.chainId,input.watcherKey,input.fromBlock.toString()],
+    );
+    return result.rows.map((row) => ({
+      chainId: 137,
+      transactionHash: String(row.transaction_hash) as `0x${string}`,
+      logIndex: Number(row.log_index),
+      accountId: String(row.account_id),
+      assetAddress: String(row.asset_address) as Address,
+      senderAddress: String(row.sender_address) as Address,
+      vaultAddress: String(row.vault_address) as Address,
+      amountBaseUnits: String(row.amount_base_units),
+      blockNumber: String(row.block_number),
+      blockHash: String(row.block_hash) as `0x${string}`,
+      confirmations: Number(row.confirmations),
+      requiredConfirmations: Number(row.required_confirmations),
+      status: String(row.status) as DepositLifecycleRecord["status"],
+    }));
+  }
+
+  async recoverReorg(input: {
+    chainId: 137;
+    watcherKey: string;
+    expectedNextBlock: bigint;
+    nextBlock: bigint;
+    lastScannedBlockHash: `0x${string}` | null;
+    orphaned: readonly DepositLifecycleRecord[];
+    reason: string;
+  }): Promise<{ reversed: number; exceptions: number }> {
+    if (input.nextBlock < 0n || input.nextBlock > input.expectedNextBlock) {
+      throw new Error("Invalid recovery checkpoint rewind.");
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      const checkpoint = await client.query(
+        `SELECT next_block::text FROM execution_chain_watcher_state
+         WHERE chain_id=$1 AND watcher_key=$2 FOR UPDATE`,
+        [input.chainId,input.watcherKey],
+      );
+      if (!checkpoint.rows[0] || BigInt(String(checkpoint.rows[0].next_block)) !== input.expectedNextBlock) {
+        throw new Error("Deposit recovery checkpoint compare-and-swap failed.");
+      }
+      let reversed = 0;
+      let exceptions = 0;
+      for (const event of input.orphaned) {
+        const result = await client.query(
+          `SELECT status,credited_event_key,block_hash FROM execution_deposit_lifecycle
+           WHERE chain_id=$1 AND watcher_key=$2 AND transaction_hash=$3 AND log_index=$4 FOR UPDATE`,
+          [input.chainId,input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex],
+        );
+        const row = result.rows[0] as {status:string;credited_event_key:string|null;block_hash:string}|undefined;
+        if (!row || row.status === "reversed") continue;
+        if (row.block_hash.toLowerCase() !== event.blockHash.toLowerCase()) {
+          throw new Error("Deposit changed while reorg recovery was being prepared; transaction aborted.");
+        }
+        if (row.credited_event_key) {
+          await client.query(
+            `UPDATE execution_deposit_lifecycle SET status='reconciliation_required',updated_at=NOW()
+             WHERE chain_id=$1 AND watcher_key=$2 AND transaction_hash=$3 AND log_index=$4`,
+            [input.chainId,input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex],
+          );
+          await client.query(
+            "UPDATE execution_control SET emergency_stop=TRUE,mismatch_detected_at=NOW(),updated_at=NOW() WHERE id=1",
+          );
+          await client.query(
+            "INSERT INTO execution_audit_events(event_type,details) VALUES('orphaned_deposit_requires_reconciliation',$1::jsonb)",
+            [JSON.stringify({watcherKey:input.watcherKey,accountId:event.accountId,assetAddress:event.assetAddress,
+              transactionHash:event.transactionHash,logIndex:event.logIndex,amountBaseUnits:event.amountBaseUnits,
+              blockNumber:event.blockNumber,blockHash:event.blockHash,reason:input.reason})],
+          );
+          exceptions++;
+        } else {
+          await client.query(
+            `UPDATE execution_deposit_lifecycle SET status='reversed',reversed_at=NOW(),updated_at=NOW()
+             WHERE chain_id=$1 AND watcher_key=$2 AND transaction_hash=$3 AND log_index=$4`,
+            [input.chainId,input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex],
+          );
+          reversed++;
+        }
+      }
+      const rewound = await client.query(
+        `UPDATE execution_chain_watcher_state SET next_block=$4,last_scanned_block_hash=$5,updated_at=NOW()
+         WHERE chain_id=$1 AND watcher_key=$2 AND next_block=$3 RETURNING next_block`,
+        [input.chainId,input.watcherKey,input.expectedNextBlock.toString(),input.nextBlock.toString(),input.lastScannedBlockHash],
+      );
+      if (rewound.rowCount !== 1) throw new Error("Deposit recovery checkpoint compare-and-swap failed.");
+      await client.query("COMMIT");
+      return {reversed,exceptions};
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
 }

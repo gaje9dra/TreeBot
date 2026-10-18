@@ -75,21 +75,16 @@ export interface DepositScannerStore {
     watcherKey: string;
     fromBlock: bigint;
   }): Promise<readonly DepositLifecycleRecord[]>;
-  /** Records compensating entries; never deletes financial journal history. */
-  reconcileOrphanedDeposits(input: {
-    chainId: 137;
-    watcherKey: string;
-    orphaned: readonly DepositLifecycleRecord[];
-    reason: string;
-  }): Promise<{ reversed: number; exceptions: number }>;
-  /** Rewind only after the same transaction has recorded all required reversals/exceptions. */
-  rewindCheckpoint(input: {
+  /** Atomically records orphan handling and rewinds the checkpoint in one database transaction. */
+  recoverReorg(input: {
     chainId: 137;
     watcherKey: string;
     expectedNextBlock: bigint;
     nextBlock: bigint;
     lastScannedBlockHash: Hash | null;
-  }): Promise<void>;
+    orphaned: readonly DepositLifecycleRecord[];
+    reason: string;
+  }): Promise<{ reversed: number; exceptions: number }>;
 }
 
 const TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -158,23 +153,21 @@ export class PolygonDepositScanner {
           const canonical = await this.chain.getBlock({ blockNumber: BigInt(record.blockNumber) });
           if (canonical.hash.toLowerCase() !== record.blockHash.toLowerCase()) orphaned.push(record);
         }
-        await this.store.reconcileOrphanedDeposits({
-          chainId: 137,
-          watcherKey: this.config.watcherKey,
-          orphaned,
-          reason: "Canonical block hash changed during deposit scanner checkpoint reconciliation.",
-        });
-        const rewindTo = orphaned.length ? orphaned.reduce((n, record) => {
-          const block = BigInt(record.blockNumber);
-          return block < n ? block : n;
-        }, fromBlock - 1n) : fromBlock - 1n;
+        const rewindTo = orphaned.length
+          ? orphaned.reduce((n, record) => {
+              const block = BigInt(record.blockNumber);
+              return block < n ? block : n;
+            }, fromBlock - 1n)
+          : fromBlock - 1n;
         const newPriorBlock = rewindTo > 0n ? await this.chain.getBlock({ blockNumber: rewindTo - 1n }) : null;
-        await this.store.rewindCheckpoint({
+        await this.store.recoverReorg({
           chainId: 137,
           watcherKey: this.config.watcherKey,
           expectedNextBlock: fromBlock,
           nextBlock: rewindTo,
           lastScannedBlockHash: newPriorBlock?.hash ?? null,
+          orphaned,
+          reason: "Canonical block hash changed during deposit scanner checkpoint reconciliation.",
         });
         throw new DepositScannerError("Chain reorganization reconciled; scanner checkpoint rewound. Retry scanning from the canonical checkpoint.");
       }

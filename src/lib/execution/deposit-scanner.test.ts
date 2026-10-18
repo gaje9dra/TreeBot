@@ -43,19 +43,17 @@ function fixture() {
   let nextBlock = 100n;
   let lastHash: Hash | null = null;
   const observations = new Map<string, { accountId: string; amount: string; blockHash: Hash; status: string }>();
-  const credited = new Set<string>();
   const store: DepositScannerStore = {
     getOrCreateCheckpoint: vi.fn(async () => ({ nextBlock, lastScannedBlockHash: lastHash })),
     commitScannedRange: vi.fn(async ({ expectedNextBlock, nextBlock: next, lastScannedBlockHash, observations: found }) => {
       if (expectedNextBlock !== nextBlock) throw new Error("checkpoint compare-and-swap mismatch");
-      let inserted = 0, newlyCredited = 0;
+      let inserted = 0;
       for (const o of found) {
         const key = `${o.chainId}:${o.transactionHash}:${o.logIndex}`;
         if (!observations.has(key)) { observations.set(key, { accountId: o.accountId, amount: o.amountBaseUnits, blockHash: o.blockHash, status: "confirmed" }); inserted++; }
-        if (o.confirmations >= o.requiredConfirmations && !credited.has(key)) { credited.add(key); newlyCredited++; }
       }
       nextBlock = next; lastHash = lastScannedBlockHash;
-      return { inserted, credited: newlyCredited, reversed: 0 };
+      return { inserted, credited: 0, reversed: 0 };
     }),
     listActiveDeposits: vi.fn(async () => []),
     reconcileOrphanedDeposits: vi.fn(async () => ({ reversed: 0, exceptions: 0 })),
@@ -81,7 +79,7 @@ describe("PolygonDepositScanner", () => {
   it("scans block ranges, checks canonical log blocks, and advances a durable checkpoint", async () => {
     const f = fixture();
     await expect(f.scanner.scanOnce()).resolves.toEqual({
-      fromBlock: "100", toBlock: "107", inserted: 1, credited: 1, reversed: 0,
+      fromBlock: "100", toBlock: "107", inserted: 1, credited: 0, reversed: 0,
     });
     expect(f.chain.getLogs).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 100n, toBlock: 107n }));
     expect(f.getNext()).toBe(108n);
