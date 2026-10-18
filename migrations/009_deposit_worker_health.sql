@@ -1,7 +1,7 @@
 -- Phase 2.4G: durable health and alert state for supervised execution workers.
 CREATE TABLE IF NOT EXISTS execution_worker_heartbeats (
   worker_key TEXT PRIMARY KEY,
-  worker_type TEXT NOT NULL CHECK (worker_type IN ('deposit')),
+  worker_type TEXT NOT NULL CHECK (worker_type IN ('deposit','valuation')),
   status TEXT NOT NULL CHECK (status IN ('starting','running','degraded','stopped','disabled')),
   started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS execution_worker_alerts (
   worker_key TEXT NOT NULL REFERENCES execution_worker_heartbeats(worker_key),
   alert_type TEXT NOT NULL CHECK (alert_type IN (
     'rpc_error','rpc_disagreement','scanner_stalled','uncredited_deposit',
-    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending','cost_basis_pending'
+    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending','valuation_stale','cost_basis_pending'
   )),
   severity TEXT NOT NULL CHECK (severity IN ('info','warning','critical')),
   dedupe_key TEXT NOT NULL UNIQUE,
@@ -38,7 +38,7 @@ ALTER TABLE execution_worker_alerts
   ADD CONSTRAINT execution_worker_alerts_alert_type_check
   CHECK (alert_type IN (
     'rpc_error','rpc_disagreement','scanner_stalled','uncredited_deposit',
-    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending'
+    'financial_incident','alert_delivery_failed','configuration_error','database_error','cost_basis_pending','valuation_stale'
   ));
 
 CREATE INDEX IF NOT EXISTS execution_worker_alerts_open_idx
