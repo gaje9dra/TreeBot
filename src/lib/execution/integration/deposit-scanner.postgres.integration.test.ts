@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import type { Address, Hash } from "viem";
-import { PostgresDepositScannerStore } from "../postgres";
+import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres";
 
 const enabled = process.env.TREEBOT_RUN_POSTGRES_INTEGRATION === "true";
 const describePostgres = enabled ? describe : describe.skip;
@@ -25,6 +25,9 @@ describePostgres("PostgresDepositScannerStore integration", () => {
   afterAll(async () => {
     if (!pool) return;
     await pool.query("DELETE FROM execution_ledger_entries WHERE account_id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_authorizations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_deposit_lifecycle WHERE watcher_key LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_chain_watcher_state WHERE watcher_key LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_audit_events WHERE details->>'watcherKey' LIKE $1", [`${prefix}%`]);
@@ -151,5 +154,30 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     expect(lifecycle.rows[0].status).toBe("reconciliation_required");
     expect(control.rows[0].emergency_stop).toBe(true);
     expect(entries.rows[0].amount_base_units).toBe("1000");
+
+    const authorizationId = `${prefix}-authorization`;
+    const intentId = `${prefix}-prepared-intent`;
+    await pool.query(
+      `INSERT INTO execution_authorizations
+       (id,owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount,expires_at,authorized_by)
+       VALUES($1,$2,137,'[]'::jsonb,'[]'::jsonb,1000,NOW()+INTERVAL '1 hour','owner_wallet')`,
+      [authorizationId,vault],
+    );
+    await pool.query(
+      `INSERT INTO execution_transactions
+       (id,idempotency_key,chain_id,wallet_address,sell_token,buy_token,side,sell_amount,quote,authorization_id,risk_checks,prepared_transaction,status)
+       VALUES($1,$2,137,$3,$4,$5,'sell',1000,'{}'::jsonb,$6,'{}'::jsonb,'{}'::jsonb,'prepared')`,
+      [intentId,`${prefix}-intent-key`,vault,token,sender,authorizationId],
+    );
+    const executionStore = new PostgresExecutionStore(pool);
+    await expect(executionStore.leasePreparedIntent("integration-worker")).resolves.toBeNull();
+    await expect(executionStore.reserveWithdrawal({
+      id: `${prefix}-withdrawal`,
+      accountId,
+      token,
+      recipient: vault,
+      amount: "1",
+      idempotencyKey: `${prefix}-withdrawal-key`,
+    })).rejects.toThrow(/emergency stop/);
   });
 });

@@ -43,7 +43,9 @@ export class PostgresExecutionStore {
   async leasePreparedIntent(workerId:string,leaseMs=30_000):Promise<StoredExecutionIntent|null>{
     if(!workerId.trim()||!Number.isInteger(leaseMs)||leaseMs<1000||leaseMs>300_000)throw new Error("Invalid worker lease.");
     const r=await this.pool.query(`WITH candidate AS (
-      SELECT id FROM execution_transactions WHERE status='prepared' AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
+      SELECT id FROM execution_transactions
+      WHERE status='prepared' AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
+        AND EXISTS (SELECT 1 FROM execution_control WHERE id=1 AND emergency_stop=FALSE)
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
       FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,leaseMs]);
@@ -136,6 +138,8 @@ export class PostgresExecutionStore {
       await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       // Serialize all reservations for a given account/asset, including the empty-ledger case.
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
+      const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
+      if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal blocked by execution emergency stop.");
       const duplicate=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",[input.idempotencyKey]);
       if(duplicate.rowCount){await c.query("COMMIT");return {reserved:false};}
       const existing=await c.query("SELECT id FROM execution_withdrawal_reservations WHERE id=$1 OR idempotency_key=$2",[input.id,input.idempotencyKey]);

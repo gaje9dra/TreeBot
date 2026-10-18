@@ -10,7 +10,7 @@ The scanner records observed Polygon ERC-20 transfers and durable lifecycle stat
 - Scanner matches each candidate to the exact receipt log index, token address, Transfer topic, sender topic, recipient topic, amount data, transaction hash, receipt block number, and receipt block hash.
 - The trusted transaction watcher also verifies that the receipt block hash matches the current canonical block.
 - PostgreSQL scanner observations and checkpoint advancement share a serializable transaction with checkpoint compare-and-swap and unique (chain_id, transaction_hash, log_index) event identity.
-- Reorg lifecycle changes and checkpoint rewind share one serializable transaction. Uncredited orphan observations are marked reversed. If an orphan is already linked to a ledger credit, the store marks it reconciliation_required, writes an audit event, enables the emergency stop, and does **not** issue an aggregate-balance-based debit.
+- Reorg lifecycle changes and checkpoint rewind share one serializable transaction. Uncredited orphan observations are marked reversed. If an orphan is already linked to a ledger credit, the store marks it reconciliation_required, writes an audit event, enables the emergency stop, blocks withdrawal reservations and prepared-intent leases, and does **not** issue an aggregate-balance-based debit.
 - GitHub Actions starts a disposable PostgreSQL 16 service, applies migrations 001–005, and runs PostgreSQL integration tests for persistence/no-credit behavior, concurrent checkpoint commits, atomic reorg rewind, credited-orphan fail-closed behavior, and transaction rollback.
 
 ## Still blocked — do not enable financial operations
