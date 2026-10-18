@@ -233,7 +233,7 @@ export class PolygonDepositScanner {
       if (!accountId) continue;
       const confirmationsBig = current >= log.blockNumber ? current - log.blockNumber + 1n : 0n;
       const confirmations = Number(confirmationsBig > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : confirmationsBig);
-      const tokenDecimals = this.config.tokenDecimalsByAddress?.[log.tokenAddress.toLowerCase()];
+      const tokenDecimals = Object.entries(this.config.tokenDecimalsByAddress ?? {}).find(([address]) => address.toLowerCase() === log.tokenAddress.toLowerCase())?.[1];
       const proof = tokenDecimals === undefined ? undefined : issueVerifiedDepositProof({
         chainId: 137,
         transactionHash: log.transactionHash,
