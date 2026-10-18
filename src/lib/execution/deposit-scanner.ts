@@ -237,6 +237,10 @@ export class PolygonDepositScanner {
       const proof = tokenDecimals === undefined ? undefined : issueVerifiedDepositProof({
         chainId: 137,
         transactionHash: log.transactionHash,
+        receiptTransactionHash: receipt.transactionHash,
+        receiptStatus: "success",
+        receiptBlockNumber: receipt.blockNumber!.toString(),
+        receiptBlockHash: receipt.blockHash!,
         logIndex: log.logIndex,
         accountId,
         tokenAddress: log.tokenAddress,
