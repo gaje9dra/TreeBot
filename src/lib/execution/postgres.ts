@@ -80,6 +80,10 @@ export class PostgresExecutionStore {
         "SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",
         [input.walletAddress,input.sellToken],
       );
+      const inventory=await c.query("SELECT COALESCE(quantity_base_units,0)::text AS amount FROM execution_position_inventory WHERE chain_id=137 AND LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[input.walletAddress,input.sellToken]);
+      const ledgerAmount=BigInt(ledger.rows[0]?.amount??"0");
+      const inventoryAmount=BigInt(inventory.rows[0]?.amount??"0");
+      if(ledgerAmount!==inventoryAmount)throw new Error("Trade reservation blocked by a ledger/inventory mismatch requiring reconciliation.");
       const heldWithdrawals=await c.query(
         `SELECT COALESCE(SUM(amount_base_units),0)::text AS amount FROM execution_withdrawal_reservations
          WHERE (LOWER(account_id)=LOWER($1) OR LOWER(source_address)=LOWER($1))
@@ -92,7 +96,7 @@ export class PostgresExecutionStore {
            AND status IN('prepared','awaiting_signature','signed','submitted','pending','unknown','replaced')`,
         [input.walletAddress,input.sellToken],
       );
-      const available=BigInt(ledger.rows[0]?.amount??"0")-BigInt(heldWithdrawals.rows[0]?.amount??"0")-BigInt(heldTrades.rows[0]?.amount??"0");
+      const available=ledgerAmount-BigInt(heldWithdrawals.rows[0]?.amount??"0")-BigInt(heldTrades.rows[0]?.amount??"0");
       if(available<0n||sellAmount>available)throw new Error("Execution exceeds available ledger balance after active trade and withdrawal reservations.");
 
       const inserted=await c.query(`INSERT INTO execution_transactions
@@ -357,9 +361,13 @@ export class PostgresExecutionStore {
       const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.sourceAddress,input.token]);
       if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
       const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
+      const inventory=await c.query("SELECT COALESCE(quantity_base_units,0)::text AS v FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
+      const ledgerAmount=BigInt(balance.rows[0]?.v??"0");
+      const inventoryAmount=BigInt(inventory.rows[0]?.v??"0");
+      if(ledgerAmount!==inventoryAmount)throw new Error("Withdrawal reservation blocked by a ledger/inventory mismatch requiring reconciliation.");
       const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE (account_id=$1 OR LOWER(source_address)=LOWER($3)) AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')",[input.accountId,input.token,input.sourceAddress]);
       const heldTrades=await c.query("SELECT COALESCE(SUM(sell_amount),0)::text AS v FROM execution_transactions WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(sell_token)=LOWER($2) AND status IN('prepared','awaiting_signature','signed','submitted','pending','unknown','replaced')",[input.sourceAddress,input.token]);
-      const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0")-BigInt(heldTrades.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds available ledger balance after active trade and withdrawal reservations.");
+      const available=ledgerAmount-BigInt(held.rows[0]?.v??"0")-BigInt(heldTrades.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds available ledger balance after active trade and withdrawal reservations.");
       await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,source_address,asset_address,recipient_address,amount_base_units,status,idempotency_key)
         VALUES($1,$2,LOWER($3),LOWER($4),LOWER($5),$6,'reserved',$7)`,[input.id,input.accountId,input.sourceAddress,input.token,input.recipient,amount.toString(),input.idempotencyKey]);
       await c.query(
