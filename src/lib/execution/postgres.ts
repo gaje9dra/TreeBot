@@ -131,9 +131,9 @@ export class PostgresExecutionStore {
             AND LOWER(a.owner_address)=LOWER(execution_transactions.wallet_address)
             AND a.revoked_at IS NULL AND a.expires_at>NOW()
             AND a.maximum_sell_amount>=execution_transactions.sell_amount
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) t WHERE LOWER(t)=LOWER(execution_transactions.sell_token))
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) t WHERE LOWER(t)=LOWER(execution_transactions.buy_token))
-            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_targets) t WHERE LOWER(t)=LOWER(execution_transactions.prepared_transaction->>'to'))
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) AS allowed(token) WHERE LOWER(allowed.token)=LOWER(execution_transactions.sell_token))
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) AS allowed(token) WHERE LOWER(allowed.token)=LOWER(execution_transactions.buy_token))
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_targets) AS allowed(target) WHERE LOWER(allowed.target)=LOWER(execution_transactions.prepared_transaction->>'to'))
         )
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
