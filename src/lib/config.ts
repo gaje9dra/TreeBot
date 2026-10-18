@@ -23,8 +23,9 @@ const configSchema = z.object({
 });
 
 export type TreeBotConfig = z.infer<typeof configSchema>;
+export type ConfigEnvironment = Record<string, string | undefined>;
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): TreeBotConfig {
+export function loadConfig(env: ConfigEnvironment = process.env): TreeBotConfig {
   const parsed = configSchema.safeParse({
     chainId: env.NEXT_PUBLIC_CHAIN_ID ?? 137,
     tradingMode: env.TREEBOT_TRADING_MODE ?? "paper",
