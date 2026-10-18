@@ -193,7 +193,16 @@ export class ZeroExPolygonQuoteAdapter {
     const value = integer(tx.value ?? "0", "transaction value", true);
     const gas = tx.gas !== undefined ? integer(tx.gas, "transaction gas") : undefined;
     const gasPrice = tx.gasPrice !== undefined ? integer(tx.gasPrice, "transaction gas price", true) : undefined;
-    const allowanceTarget = optionalAddress(q.issues && typeof q.issues === "object" ? (q.issues as Record<string, unknown>).allowance : undefined, "allowance target");
+    const allowanceIssues = q.issues && typeof q.issues === "object" ? q.issues as Record<string, unknown> : {};
+    const allowanceTarget = optionalAddress(allowanceIssues.allowance, "allowance target");
+    const spenderTarget = optionalAddress(allowanceIssues.allowanceSpender, "allowance spender");
+    if (allowanceTarget && spenderTarget && allowanceTarget !== spenderTarget) {
+      throw new QuoteValidationError("Quote returned conflicting allowance spender fields.");
+    }
+    const resolvedAllowanceTarget = spenderTarget ?? allowanceTarget;
+    if (resolvedAllowanceTarget && !this.config.allowedTransactionTargets.some((target) => target.toLowerCase() === resolvedAllowanceTarget.toLowerCase())) {
+      throw new QuoteValidationError("Allowance spender is not independently allowlisted.");
+    }
 
     const maximumAge = this.config.maximumQuoteAgeMs ?? DEFAULT_QUOTE_MAX_AGE_MS;
     const now = this.config.now?.() ?? Date.now();
@@ -225,7 +234,7 @@ export class ZeroExPolygonQuoteAdapter {
 
     return {
       provider: "0x", chainId: 137, sellToken: expected.sellToken, buyToken: expected.buyToken,
-      sellAmount, buyAmount, minBuyAmount, taker: expected.taker, allowanceTarget,
+      sellAmount, buyAmount, minBuyAmount, taker: expected.taker, allowanceTarget: resolvedAllowanceTarget,
       transaction: { to, data: tx.data as `0x${string}`, value, ...(gas ? { gas } : {}), ...(gasPrice !== undefined ? { gasPrice } : {}) },
       liquiditySources: sources, estimatedGas: gas ?? null, quoteTimestamp: receivedAt,
       priceImpactBps, slippageBps: quotedSlippage, rawFeeAmounts: fees,
