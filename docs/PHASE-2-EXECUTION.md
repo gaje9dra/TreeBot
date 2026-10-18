@@ -19,8 +19,8 @@ The vault is a test-environment enforcement primitive, not permission to custody
 ## Deposits, withdrawals and balances
 
 - Contract-level owner deposit and withdrawal methods and database-side replay-safe deposit event accounting/withdrawal reservations are present as primitives.
-- The database deposit method still accepts caller-supplied receipt/confirmation fields; a trusted chain-event watcher must verify receipts, token contract, recipient, transfer log, confirmation depth and reorg handling before it invokes accounting.
-- The current withdrawal reservation is not a completed release path and no signing/broadcast adapter for withdrawals is supplied. Do not represent it as a user-facing operational withdrawal workflow.
+- The direct database deposit-credit method now fails closed: caller-supplied receipt/confirmation fields cannot credit funds. The hash verifier enforces Polygon, direct ERC-20 `transfer`, matching receipt logs, configured token allowlist and confirmation depth, but it is not yet a durable block/log scanner and has no database-backed proof adapter or reorg reversal. Deposits remain disabled.
+- The withdrawal reservation primitive is not a completed withdrawal settlement/recovery workflow. No authenticated API, token/recipient authorization binding, cap/gas policy, signer, broadcast/replacement tracking or receipt-driven terminal transition is wired. Do not represent it as a user-facing operational withdrawal workflow.
 - Journal entries use exact signed base-unit amounts: deposit/buy credits are positive; sell/gas/fee debits are negative. The current aggregate journal is not yet a complete inventory/position/P&L subledger. Realized/unrealized P&L, committed position valuation, pending transfer/nonce handling, and full product balance API/UI are not complete.
 - The 150 POL eligibility threshold is separate from allocated/deposited capital. Do not count a connected wallet’s observed funds as vault deposits, and reserve gas before any future eligibility/accounting check.
 

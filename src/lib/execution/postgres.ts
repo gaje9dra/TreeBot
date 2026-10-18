@@ -104,22 +104,25 @@ export class PostgresExecutionStore {
       await c.query("COMMIT");
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
-  async recordDepositEvent(input:{accountId:string;token:string;amount:string;from:string;to:string;txHash:string;logIndex:number;blockNumber:string;confirmed:boolean;confirmations:number;requiredConfirmations?:number}):Promise<{credited:boolean}>{
-    assertPositiveBaseUnits(input.amount,"deposit amount");
-    if(!input.confirmed||input.confirmations<(input.requiredConfirmations??3))throw new Error("Deposit is not sufficiently confirmed.");
-    if(!/^0x[0-9a-fA-F]{64}$/.test(input.txHash)||!Number.isInteger(input.logIndex)||input.logIndex<0||!/^[1-9][0-9]*$/.test(input.blockNumber))throw new Error("Invalid deposit event identity.");
-    const c=await this.pool.connect();
-    try{
-      await c.query("BEGIN");
-      const i=await c.query(`INSERT INTO execution_deposit_events(chain_id,transaction_hash,log_index,account_id,asset_address,amount_base_units,from_address,to_address,block_number,confirmed_at)
-        VALUES(137,$1,$2,$3,$4,$5,$6,$7,$8,NOW()) ON CONFLICT(chain_id,transaction_hash,log_index) DO NOTHING RETURNING transaction_hash`,
-        [input.txHash.toLowerCase(),input.logIndex,input.accountId,input.token,input.amount,input.from,input.to,input.blockNumber]);
-      if(i.rowCount===1)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-        VALUES($1,$2,'deposit',$3,$4,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-        [input.accountId,`${input.txHash.toLowerCase()}:${input.logIndex}:deposit`,input.token,input.amount,input.txHash.toLowerCase(),
-          JSON.stringify({from:input.from,to:input.to,blockNumber:input.blockNumber})]);
-      await c.query("COMMIT");return {credited:i.rowCount===1};
-    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+  /**
+   * Deposit ledger insertion is intentionally disabled until a private server-side watcher
+   * can present independently verified receipt/log/finality evidence. Caller-supplied booleans
+   * are not proof of an on-chain event and must never create credit.
+   */
+  async recordDepositEvent(_input: {
+    accountId: string;
+    token: string;
+    amount: string;
+    from: string;
+    to: string;
+    txHash: string;
+    logIndex: number;
+    blockNumber: string;
+    confirmed: boolean;
+    confirmations: number;
+    requiredConfirmations?: number;
+  }): Promise<{ credited: boolean }> {
+    throw new Error("Deposit credit is disabled until trusted durable chain-proof verification is configured.");
   }
   /** Serialize reserve operations so concurrent withdrawals cannot overspend the same ledger balance. */
   async reserveWithdrawal(input:{id:string;accountId:string;token:string;recipient:string;amount:string;idempotencyKey:string}):Promise<{reserved:boolean}>{
