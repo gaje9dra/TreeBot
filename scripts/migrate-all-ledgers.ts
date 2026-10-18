@@ -18,6 +18,7 @@ const migrations = [
   "migrations/009_deposit_worker_health.sql",
   "migrations/010_trade_settlement_inventory.sql",
   "migrations/011_trade_accounting.sql",
+  "migrations/012_asset_valuation_evidence.sql",
 ];
 
 async function main() {
