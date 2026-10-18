@@ -1,4 +1,4 @@
-import { loadEnvConfig } from "next/env";
+import { loadEnvConfig } from "@next/env";
 import { createLedgerPool } from "../src/lib/ledger/postgres";
 
 loadEnvConfig(process.cwd());
