@@ -421,7 +421,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     const wallet = integrationWallet;
     const buyToken = "0x0000000000000000000000000000000000000080" as Address;
     const recipient = "0x0000000000000000000000000000000000000090" as Address;
-    const executionStore = new PostgresExecutionStore(pool);
+    const executionStore = new PostgresExecutionStore(pool, token);
     await pool.query(
       "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
       [wallet, prefix + "-trade-withdrawal-funding", token, hash(910)],
