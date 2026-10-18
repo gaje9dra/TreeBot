@@ -33,7 +33,7 @@ function fixture(status: "success" | "reverted" = "success") {
   const chain: WithdrawalChainReader = {
     getChainId: vi.fn(async () => 137),
     getTransactionReceipt: vi.fn(async () => receipt),
-    getTransaction: vi.fn(async () => ({ hash: txHash, from: source, to: token })),
+    getTransaction: vi.fn(async () => ({ hash: txHash, from: source, to: token, nonce: 21 })),
     getBlockNumber: vi.fn(async () => 170n),
     getBlock: vi.fn(async ({ blockNumber }) => ({ number: blockNumber, hash: blockHash, parentHash: blockHash })),
   };
@@ -57,6 +57,7 @@ describe("verifyWithdrawalSettlement", () => {
     expect(proof).toMatchObject({
       withdrawalId: "withdrawal-1",
       chainId: 137,
+      nonce: 21,
       status: "confirmed",
       reservedAmountBaseUnits: "1234",
       actualAmountBaseUnits: "1234",
