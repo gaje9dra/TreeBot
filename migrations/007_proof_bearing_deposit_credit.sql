@@ -5,7 +5,9 @@ ALTER TABLE execution_deposit_events
   ADD COLUMN IF NOT EXISTS block_hash TEXT,
   ADD COLUMN IF NOT EXISTS vault_address TEXT,
   ADD COLUMN IF NOT EXISTS token_decimals SMALLINT NOT NULL DEFAULT 18
-    CHECK (token_decimals BETWEEN 0 AND 36);
+    CHECK (token_decimals BETWEEN 0 AND 36),
+  ADD COLUMN IF NOT EXISTS receipt_status TEXT NOT NULL DEFAULT 'success'
+    CHECK (receipt_status = 'success');
 
 ALTER TABLE execution_deposit_lifecycle
   ADD COLUMN IF NOT EXISTS token_decimals SMALLINT
