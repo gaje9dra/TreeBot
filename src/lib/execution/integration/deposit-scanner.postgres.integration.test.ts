@@ -566,7 +566,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       const accounting=await pool.query("SELECT realized_pnl_quote_base_units::text AS pnl,accounting_status FROM execution_trade_accounting WHERE execution_id=$1",[secondId]);
       expect(accounting.rows[0]).toEqual({pnl:"20",accounting_status:"complete"});
       const snapshot=await executionStore.getPortfolioSnapshot(wallet,token);
-      expect(snapshot.realizedPnlByQuoteAsset).toContainEqual({quoteAssetAddress:token.toLowerCase(),realizedPnlBaseUnits:"20"});
+      expect(snapshot.realizedPnlBeforeGasByQuoteAsset).toContainEqual({quoteAssetAddress:token.toLowerCase(),realizedPnlBaseUnits:"20"});
       expect(snapshot.pendingTradeAccountingCount).toBe(0);
       expect(snapshot.valuationComplete).toBe(false);
     } finally {
