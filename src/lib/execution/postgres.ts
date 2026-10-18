@@ -294,11 +294,11 @@ export class PostgresExecutionStore {
       }
       const nextStatus=proof.status;
       const evidence=JSON.stringify({withdrawalId:proof.withdrawalId,chainId:proof.chainId,transactionHash:proof.transactionHash.toLowerCase(),
-        status:proof.status,sourceAddress:proof.sourceAddress.toLowerCase(),tokenAddress:proof.tokenAddress.toLowerCase(),
+        status:proof.status,nonce:proof.nonce,sourceAddress:proof.sourceAddress.toLowerCase(),tokenAddress:proof.tokenAddress.toLowerCase(),
         recipientAddress:proof.recipientAddress.toLowerCase(),reservedAmountBaseUnits:proof.reservedAmountBaseUnits,
         actualAmountBaseUnits:proof.actualAmountBaseUnits,logIndex:proof.logIndex,blockNumber:proof.blockNumber,
         blockHash:proof.blockHash.toLowerCase(),confirmations:proof.confirmations,requiredConfirmations:proof.requiredConfirmations,gasWei:proof.gasWei});
-      await c.query(`UPDATE execution_withdrawal_reservations SET status=$2,transaction_hash=COALESCE(transaction_hash,$3),
+      await c.query(`UPDATE execution_withdrawal_reservations SET status=$2,transaction_hash=COALESCE(transaction_hash,$3),nonce=COALESCE(nonce,$9),
         confirmation_block=$4,confirmation_block_hash=LOWER($5),settlement_actual_amount=$6,settlement_gas_wei=$7,
         settlement_status=$2,settlement_evidence=$8::jsonb,settlement_verified_at=NOW(),settled_at=NOW(),
         failure_reason=CASE WHEN $2='reverted' THEN 'On-chain withdrawal reverted; principal was not debited.' ELSE NULL END,updated_at=NOW()
