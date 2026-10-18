@@ -1,5 +1,8 @@
+import { loadEnvConfig } from "next/env";
 import { createLedgerPool, PostgresPaperLedger } from "@/lib/ledger/postgres";
 import { runPaperCycle } from "@/lib/worker/paper-cycle";
+
+loadEnvConfig(process.cwd());
 
 const pairs = (process.env.TREEBOT_MARKET_PAIRS ?? "")
   .split(",")
