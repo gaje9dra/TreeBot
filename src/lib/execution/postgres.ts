@@ -341,6 +341,10 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
             !isIssuedVerifiedDepositProof(proof) ||
             proof.chainId !== event.chainId ||
             proof.transactionHash.toLowerCase() !== event.transactionHash.toLowerCase() ||
+            proof.receiptTransactionHash.toLowerCase() !== event.transactionHash.toLowerCase() ||
+            proof.receiptStatus !== "success" ||
+            proof.receiptBlockNumber !== blockNumber.toString() ||
+            proof.receiptBlockHash.toLowerCase() !== event.blockHash.toLowerCase() ||
             proof.logIndex !== event.logIndex ||
             proof.accountId !== event.accountId ||
             proof.tokenAddress.toLowerCase() !== event.assetAddress.toLowerCase() ||
@@ -371,8 +375,8 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           const deposit = await c.query(
             `INSERT INTO execution_deposit_events
               (chain_id,transaction_hash,log_index,account_id,asset_address,amount_base_units,from_address,to_address,
-               block_number,confirmed_at,block_hash,vault_address,token_decimals)
-             VALUES(137,$1,$2,$3,LOWER($4),$5,LOWER($6),LOWER($7),$8,NOW(),LOWER($9),LOWER($10),$11)
+               block_number,confirmed_at,block_hash,vault_address,token_decimals,receipt_status)
+             VALUES(137,$1,$2,$3,LOWER($4),$5,LOWER($6),LOWER($7),$8,NOW(),LOWER($9),LOWER($10),$11,'success')
              ON CONFLICT(chain_id,transaction_hash,log_index) DO NOTHING RETURNING transaction_hash`,
             [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,event.assetAddress,amount.toString(),
               event.senderAddress,event.vaultAddress,blockNumber.toString(),event.blockHash,event.vaultAddress,proof.tokenDecimals],
@@ -404,7 +408,7 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           } else {
             const existing = await c.query(
               `SELECT account_id,LOWER(asset_address) AS asset_address,amount_base_units::text,LOWER(from_address) AS from_address,
-                      LOWER(to_address) AS to_address,block_number::text,LOWER(block_hash) AS block_hash,token_decimals
+                      LOWER(to_address) AS to_address,block_number::text,LOWER(block_hash) AS block_hash,token_decimals,receipt_status
                FROM execution_deposit_events WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
               [event.transactionHash.toLowerCase(),event.logIndex],
             );
@@ -413,7 +417,7 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
                 prior.asset_address !== event.assetAddress.toLowerCase() || prior.amount_base_units !== amount.toString() ||
                 prior.from_address !== event.senderAddress.toLowerCase() || prior.to_address !== event.vaultAddress.toLowerCase() ||
                 prior.block_number !== blockNumber.toString() || prior.block_hash !== event.blockHash.toLowerCase() ||
-                Number(prior.token_decimals) !== proof.tokenDecimals) {
+                Number(prior.token_decimals) !== proof.tokenDecimals || prior.receipt_status !== proof.receiptStatus) {
               throw new Error("Duplicate deposit identity conflicts with its immutable verified funding provenance.");
             }
             const ledger = await c.query("SELECT 1 FROM execution_ledger_entries WHERE event_key=$1", [eventKey]);
