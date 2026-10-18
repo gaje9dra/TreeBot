@@ -280,7 +280,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     } as unknown as DepositRangeReader;
     const scanner = new PolygonDepositScanner(fakeChain, store, {
       watcherKey, startBlock: 700n, vaultAddress: vault, supportedTokenAddresses: [token],
-      tokenDecimalsByAddress: { [token.toLowerCase()]: 6 }, confirmations: 64, maxBlockRange: 100,
+      creditingEnabled: true, tokenDecimalsByAddress: { [token.toLowerCase()]: 6 }, confirmations: 64, maxBlockRange: 100,
       accountForSender: async () => accountId,
     });
     const results = await Promise.allSettled([scanner.scanOnce(), scanner.scanOnce()]);
