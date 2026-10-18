@@ -26,3 +26,12 @@ The scanner records observed Polygon ERC-20 transfers and durable lifecycle stat
 - Implement a trusted server-side credit boundary that persists verified receipt block hash, exact log identity, finality evidence, and an idempotent ledger entry in one PostgreSQL transaction.
 - Wire the scanner to a controlled runtime only after configuration and account mapping are independently authenticated.
 - Keep deposits, withdrawals, and live trading disabled until the remaining gates are implemented, independently reviewed, and verified on the exact final commit.
+
+
+## Release-gate clarification — 2026-10-18
+
+The current scanner's PostgreSQL integration coverage proves atomic checkpoint/event persistence, concurrent checkpoint compare-and-swap, rollback, and fail-closed handling of a previously credited event that becomes orphaned. It does **not** prove that a verified deposit can be credited spendably, because the store's `recordDepositEvent` boundary remains intentionally disabled.
+
+Do not remove this disabled boundary by passing scanner observations directly into the ledger. Before enabling credits, introduce an unforgeable server-side proof object produced only by the trusted watcher, validate receipt/block/log identity and finality within the credit transaction, enforce unique `(chain_id, transaction_hash, log_index)` identity, and add allocation provenance before compensating any previously credited orphan. The production watcher also needs supervised runtime wiring, authenticated sender-to-account mapping, alerting, and a tested recovery drill.
+
+Until those controls and independent review are complete, keep deposits, withdrawals, and live execution disabled.
