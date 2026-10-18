@@ -12,6 +12,30 @@ export interface RecordDecisionResult {
   reason?: string;
 }
 
+export interface PaperTradeRecord {
+  id: number;
+  decisionId: string;
+  pair: string;
+  side: "buy" | "sell";
+  notionalQuote: number;
+  executionPrice: number;
+  quantityBase: number;
+  feesQuote: number;
+  slippageQuote: number;
+  gasQuote: number;
+  realizedPnlQuote: number | null;
+  status: "simulated";
+  createdAt: string;
+}
+
+export interface PaperDashboardSnapshot {
+  control: PaperControlState;
+  portfolio: PortfolioState;
+  startingEquityQuote: number;
+  realizedPnlQuote: number;
+  trades: PaperTradeRecord[];
+}
+
 export function createLedgerPool(env: Record<string, string | undefined> = process.env): Pool {
   const connectionString = env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required for the durable paper ledger.");
@@ -54,8 +78,8 @@ export class PostgresPaperLedger {
     return { enabled: result.rows[0].paper_enabled === true, emergencyStop: result.rows[0].emergency_stop === true };
   }
 
-  async getPortfolio(pair: string, markPrice: number, now = Date.now()): Promise<PortfolioState> {
-    if (!Number.isFinite(markPrice) || markPrice <= 0) throw new Error("A valid mark price is required for paper portfolio valuation.");
+  async getPortfolio(pair: string, markPrice?: number, now = Date.now()): Promise<PortfolioState> {
+    if (markPrice !== undefined && (!Number.isFinite(markPrice) || markPrice <= 0)) throw new Error("Mark price must be positive when supplied.");
     await this.pool.query(
       `INSERT INTO paper_portfolios
        (pair, starting_equity_quote, cash_quote, daily_start_equity_quote, daily_start_date, peak_equity_quote)
@@ -70,7 +94,8 @@ export class PostgresPaperLedger {
     const position = positionResult.rows[0];
     const cash = numberValue(row.cash_quote);
     const quantity = position ? numberValue(position.quantity_base) : 0;
-    const equity = cash + quantity * markPrice;
+    const effectiveMarkPrice = markPrice ?? (position ? numberValue(position.entry_price) : 0);
+    const equity = cash + quantity * effectiveMarkPrice;
     const peak = Math.max(numberValue(row.peak_equity_quote), equity);
     const today = new Date(now).toISOString().slice(0, 10);
     const dailyStartDate = String(row.daily_start_date).slice(0, 10);
@@ -99,6 +124,46 @@ export class PostgresPaperLedger {
       consecutiveLosses: Number(row.consecutive_losses),
       tradesLastHour: Number(tradesResult.rows[0]?.count ?? 0),
       gasSpentQuote: gasSpent,
+    };
+  }
+
+  async getRecentTrades(pair: string, limit = 20): Promise<PaperTradeRecord[]> {
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const result = await this.pool.query(
+      "SELECT id, decision_id, pair, side, notional_quote, execution_price, quantity_base, fees_quote, slippage_quote, gas_quote, realized_pnl_quote, status, created_at FROM paper_trades WHERE pair = $1 ORDER BY created_at DESC LIMIT $2",
+      [pair, safeLimit],
+    );
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      decisionId: String(row.decision_id),
+      pair: String(row.pair),
+      side: row.side as "buy" | "sell",
+      notionalQuote: numberValue(row.notional_quote),
+      executionPrice: numberValue(row.execution_price),
+      quantityBase: numberValue(row.quantity_base),
+      feesQuote: numberValue(row.fees_quote),
+      slippageQuote: numberValue(row.slippage_quote),
+      gasQuote: numberValue(row.gas_quote),
+      realizedPnlQuote: row.realized_pnl_quote === null ? null : numberValue(row.realized_pnl_quote),
+      status: "simulated",
+      createdAt: new Date(row.created_at).toISOString(),
+    }));
+  }
+
+  async getDashboard(pair: string, markPrice?: number, now = Date.now()): Promise<PaperDashboardSnapshot> {
+    const control = await this.getControl();
+    const portfolio = await this.getPortfolio(pair, markPrice, now);
+    const startingResult = await this.pool.query("SELECT starting_equity_quote FROM paper_portfolios WHERE pair = $1", [pair]);
+    const pnlResult = await this.pool.query(
+      "SELECT COALESCE(SUM(realized_pnl_quote), 0) AS realized_pnl_quote FROM paper_trades WHERE pair = $1",
+      [pair],
+    );
+    return {
+      control,
+      portfolio,
+      startingEquityQuote: numberValue(startingResult.rows[0]?.starting_equity_quote),
+      realizedPnlQuote: numberValue(pnlResult.rows[0]?.realized_pnl_quote),
+      trades: await this.getRecentTrades(pair, 20),
     };
   }
 

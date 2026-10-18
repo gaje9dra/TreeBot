@@ -59,4 +59,4 @@ Use Node.js 22 to match CI. On a fresh clone run `npm install`. To configure the
 
 ## Current limitations
 
-The health endpoint describes process/config health only; it does not prove RPC health, market freshness or trading-worker liveness. The dashboard activity events are local UI events unless explicitly stated otherwise. Historical replay and paper fills are simulation only. Real swaps, deposits, withdrawals and persistence are not yet wired.
+The health endpoint describes process/config health only; it does not prove RPC health or worker liveness. The dashboard polls the PostgreSQL paper ledger for worker controls, simulated equity, realized paper P&L, and recent simulated fills. Worker operation still requires an external PostgreSQL database, configured provider, and a separately supervised worker process. Historical replay and paper fills are simulation only. Real swaps, deposits, and withdrawals remain disabled.

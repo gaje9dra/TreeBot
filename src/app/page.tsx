@@ -9,9 +9,19 @@ import { formatEther, isAddress, type Address } from "viem";
 import { polygon } from "viem/chains";
 import { assessNativeCapital, validateConnectedChain } from "@/lib/wallet/polygon";
 import type { BacktestReport } from "@/lib/trading/backtest";
-import type { MarketSnapshot } from "@/lib/trading/types";
+import type { MarketSnapshot, PortfolioState } from "@/lib/trading/types";
+import type { PaperTradeRecord } from "@/lib/ledger/postgres";
 
 type FeedEvent = { title: string; detail: string; time: string; type: "info" | "warn" | "good" };
+type PaperDashboardPayload = {
+  control: { enabled: boolean; emergencyStop: boolean };
+  portfolio: PortfolioState;
+  startingEquityQuote: number;
+  realizedPnlQuote: number;
+  trades: PaperTradeRecord[];
+  marketDataAvailable: boolean;
+  marketDataError?: string;
+};
 type Eip1193Provider = {
   request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
   on?: (event: string, listener: (...args: unknown[]) => void) => void;
@@ -57,6 +67,8 @@ export default function HomePage() {
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [backtestError, setBacktestError] = useState<string>();
   const [backtestReport, setBacktestReport] = useState<BacktestReport>();
+  const [paperDashboard, setPaperDashboard] = useState<PaperDashboardPayload>();
+  const [paperDashboardError, setPaperDashboardError] = useState<string>();
 
   const chain = useMemo(() => validateConnectedChain(chainId), [chainId]);
   const capital = useMemo(() => balanceWei === undefined ? null : assessNativeCapital(balanceWei), [balanceWei]);
@@ -119,6 +131,32 @@ export default function HomePage() {
     };
   }, [logEvent, refreshWallet]);
 
+
+  useEffect(() => {
+    let active = true;
+    const refreshPaperDashboard = async () => {
+      try {
+        const response = await fetch("/api/paper/status?pair=" + encodeURIComponent(marketPair), { cache: "no-store" });
+        const payload = await response.json() as PaperDashboardPayload & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Paper ledger status is unavailable.");
+        if (active) {
+          setPaperDashboard(payload);
+          setPaperDashboardError(undefined);
+        }
+      } catch (error) {
+        if (active) {
+          setPaperDashboard(undefined);
+          setPaperDashboardError(error instanceof Error ? error.message : "Paper ledger status is unavailable.");
+        }
+      }
+    };
+    void refreshPaperDashboard();
+    const interval = window.setInterval(() => void refreshPaperDashboard(), 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [marketPair]);
 
   async function refreshMarketData() {
     const pair = marketPair.trim();
@@ -246,7 +284,7 @@ export default function HomePage() {
       <div className="grid">
         <Metric icon={<Wallet size={14} />} label="WALLET BALANCE" value={balanceDisplay} meta={address ? (chainId === polygon.id ? "Read from connected wallet on Polygon PoS" : "Switch to Polygon to display eligible balance") : "Connect wallet to read native balance"} />
         <Metric icon={<ShieldCheck size={14} />} label="STARTING CAPITAL" value={capitalDisplay ? (capital!.eligible ? "ELIGIBLE" : "NOT READY") : "150 POL"} meta={capitalDisplay ? `Shortfall incl. gas reserve: ${capital!.shortfallPol.toFixed(4)} POL` : "150 POL minimum + 2 POL gas reserve"} tone={capitalDisplay && capital!.eligible ? "good" : "normal"} />
-        <Metric icon={<Gauge size={14} />} label="PAPER WORKER" value="SEPARATE PROCESS" meta="Use CLI status/logs and PostgreSQL ledger to verify worker operation" tone="warn" />
+        <Metric icon={<Gauge size={14} />} label="PAPER WORKER" value={paperDashboard ? (paperDashboard.control.emergencyStop ? "EMERGENCY STOP" : paperDashboard.control.enabled ? "ENABLED" : "DISABLED") : "UNKNOWN"} meta={paperDashboard ? (paperDashboard.marketDataAvailable ? "Ledger status refreshed · provider mark available" : "Ledger available · provider mark unavailable") : paperDashboardError ?? "Checking durable paper ledger"} tone={paperDashboard?.control.emergencyStop || !paperDashboard || !paperDashboard.control.enabled ? "warn" : "good"} />
         <Metric icon={<Blocks size={14} />} label="NETWORK" value={chain.valid ? "POLYGON POS" : "NOT VERIFIED"} meta={`Expected chain ID 137 · detected ${chainId ?? "unknown"}`} tone={chain.valid ? "good" : "warn"} />
       </div>
 
@@ -273,6 +311,10 @@ export default function HomePage() {
           <div className="risk-row"><span>Max simulated order</span><strong>5 POL</strong></div>
           <div className="risk-row"><span>Daily loss threshold</span><strong>2%</strong></div>
           <div className="risk-row"><span>Maximum drawdown</span><strong>8%</strong></div>
+          <div className="risk-row"><span>Paper portfolio equity</span><strong>{paperDashboard ? paperDashboard.portfolio.equityQuote.toFixed(2) + " quote units" : "—"}</strong></div>
+          <div className="risk-row"><span>Realized paper P&amp;L</span><strong style={{ color: paperDashboard && paperDashboard.realizedPnlQuote >= 0 ? "var(--mint)" : "var(--red)" }}>{paperDashboard ? (paperDashboard.realizedPnlQuote >= 0 ? "+" : "") + paperDashboard.realizedPnlQuote.toFixed(4) : "—"}</strong></div>
+          <div className="risk-row"><span>Available simulated cash</span><strong>{paperDashboard ? paperDashboard.portfolio.availableQuote.toFixed(2) : "—"}</strong></div>
+          {paperDashboardError && <div className="callout" style={{ marginTop: 12 }}>Paper ledger status unavailable: {paperDashboardError}</div>}
           <div className="callout" style={{ marginTop: 17 }}><AlertTriangle size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />This dashboard does not currently submit blockchain transactions. A production trading adapter and independent security review are mandatory before real funds can be exposed.</div>
         </section>
       </div>
@@ -329,7 +371,11 @@ export default function HomePage() {
       </section>
 
       <div className="section-head"><h2>Trade ledger</h2><span className="eyebrow">NO SIMULATED OR LIVE FILLS RECORDED</span></div>
-      <section className="card table-wrap"><table><thead><tr><th>TIME</th><th>PAIR</th><th>SIDE</th><th>SIZE</th><th>EXECUTION</th><th>FEES</th><th>STATUS</th></tr></thead><tbody><tr><td colSpan={7} className="empty">No trades yet. Paper fills will only be recorded by the strategy service after an accepted decision.</td></tr></tbody></table></section>
+      <section className="card table-wrap"><table><thead><tr><th>TIME</th><th>PAIR</th><th>SIDE</th><th>NOTIONAL</th><th>EXECUTION</th><th>FEES + GAS</th><th>REALIZED P&amp;L</th><th>STATUS</th></tr></thead><tbody>
+        {paperDashboard?.trades.length ? paperDashboard.trades.map((trade) => <tr key={trade.id}>
+          <td>{new Date(trade.createdAt).toLocaleString()}</td><td>{trade.pair}</td><td>{trade.side.toUpperCase()}</td><td>{trade.notionalQuote.toFixed(4)}</td><td>{trade.executionPrice.toPrecision(8)}</td><td>{(trade.feesQuote + trade.gasQuote).toFixed(4)}</td><td>{trade.realizedPnlQuote === null ? "—" : (trade.realizedPnlQuote >= 0 ? "+" : "") + trade.realizedPnlQuote.toFixed(4)}</td><td><span className="status warn">SIMULATED</span></td>
+        </tr>) : <tr><td colSpan={8} className="empty">{paperDashboardError ? "Paper ledger unavailable: " + paperDashboardError : "No simulated fills recorded yet. The worker is disabled by default and must be explicitly enabled from the CLI."}</td></tr>}
+        </tbody></table></section>
 
       <div className="section-head"><h2>Coming online in guarded stages</h2><span className="eyebrow">PRODUCTION READINESS</span></div>
       <div className="grid">
