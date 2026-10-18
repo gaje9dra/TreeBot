@@ -30,7 +30,8 @@ export interface VerifiedWithdrawalSettlement {
   readonly sourceAddress: Address;
   readonly tokenAddress: Address;
   readonly recipientAddress: Address;
-  readonly amountBaseUnits: string;
+  readonly reservedAmountBaseUnits: string;
+  readonly actualAmountBaseUnits: string;
   readonly logIndex: number | null;
   readonly blockNumber: string;
   readonly blockHash: Hash;
@@ -50,7 +51,10 @@ function issueSettlementProof(input: VerifiedWithdrawalSettlement): VerifiedWith
     !/^0x[0-9a-fA-F]{40}$/.test(proof.sourceAddress) ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.tokenAddress) ||
     !/^0x[0-9a-fA-F]{40}$/.test(proof.recipientAddress) ||
-    !/^(0|[1-9][0-9]*)$/.test(proof.amountBaseUnits) ||
+    !/^[1-9][0-9]*$/.test(proof.reservedAmountBaseUnits) ||
+    !/^(0|[1-9][0-9]*)$/.test(proof.actualAmountBaseUnits) ||
+    (proof.status === "confirmed" && proof.actualAmountBaseUnits !== proof.reservedAmountBaseUnits) ||
+    (proof.status === "reverted" && proof.actualAmountBaseUnits !== "0") ||
     !/^[1-9][0-9]*$/.test(proof.blockNumber) ||
     !/^0x[0-9a-fA-F]{64}$/.test(proof.blockHash) ||
     !Number.isInteger(proof.confirmations) || proof.confirmations < 1 ||
@@ -88,7 +92,7 @@ export async function verifyWithdrawalSettlement(
   if (!request.withdrawalId.trim() || !/^0x[0-9a-fA-F]{64}$/.test(request.transactionHash)) {
     throw new Error("Invalid withdrawal ID or transaction hash.");
   }
-  if (![request.sourceAddress, request.tokenAddress, request.recipientAddress].every(isAddress)) {
+  if (![request.sourceAddress, request.tokenAddress, request.recipientAddress].every((address) => isAddress(address))) {
     throw new Error("Invalid withdrawal source, token, or recipient address.");
   }
   if (!/^[1-9][0-9]*$/.test(request.amountBaseUnits)) throw new Error("Withdrawal amount must be positive base units.");
@@ -150,7 +154,8 @@ export async function verifyWithdrawalSettlement(
     sourceAddress: source,
     tokenAddress: token,
     recipientAddress: recipient,
-    amountBaseUnits: receipt.status === "success" ? request.amountBaseUnits : "0",
+    reservedAmountBaseUnits: request.amountBaseUnits,
+    actualAmountBaseUnits: receipt.status === "success" ? request.amountBaseUnits : "0",
     logIndex: receipt.status === "success" ? matches[0]! : null,
     blockNumber: receipt.blockNumber.toString(),
     blockHash: receipt.blockHash,
