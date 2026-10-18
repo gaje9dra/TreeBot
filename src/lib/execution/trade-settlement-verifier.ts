@@ -1,6 +1,7 @@
 import { decodeEventLog, getAddress, isAddress, parseAbi, type Address, type Hash, type Hex } from "viem";
 
 const transferAbi = parseAbi(["event Transfer(address indexed from,address indexed to,uint256 value)"]);
+const MIN_TRADE_CONFIRMATIONS = 64;
 const issuedProofs = new WeakSet<object>();
 
 export interface TradeReceiptLog {
@@ -68,6 +69,8 @@ export function isIssuedVerifiedTradeSettlement(value: unknown): value is Verifi
   if (typeof value !== "object" || value === null || !issuedProofs.has(value)) return false;
   const proof = value as Partial<VerifiedTradeSettlement>;
   return proof.chainId === 137 && typeof proof.executionId === "string" && proof.executionId.length > 0 &&
+    Number.isInteger(proof.requiredConfirmations) && Number(proof.requiredConfirmations) >= MIN_TRADE_CONFIRMATIONS &&
+    Number.isInteger(proof.confirmations) && Number(proof.confirmations) >= Number(proof.requiredConfirmations) &&
     typeof proof.transactionHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(proof.transactionHash) &&
     Number.isSafeInteger(proof.nonce) && Number(proof.nonce) >= 0 &&
     (proof.status === "confirmed" || proof.status === "reverted") &&
@@ -89,7 +92,7 @@ export async function verifyTradeSettlement(reader: TradeSettlementReader, reque
   if (!/^[1-9][0-9]*$/.test(request.reservedSellAmountBaseUnits) ||
       !/^(0|[1-9][0-9]*)$/.test(request.transactionValueWei) ||
       !Number.isSafeInteger(request.nonce) || request.nonce < 0 ||
-      !Number.isInteger(request.requiredConfirmations) || request.requiredConfirmations < 1 || request.requiredConfirmations > 10_000) {
+      !Number.isInteger(request.requiredConfirmations) || request.requiredConfirmations < MIN_TRADE_CONFIRMATIONS || request.requiredConfirmations > 10_000) {
     throw new Error("Trade settlement amount, nonce, value, or confirmation policy is invalid.");
   }
   const txHash = request.transactionHash.toLowerCase() as Hash;
