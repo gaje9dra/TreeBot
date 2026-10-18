@@ -24,6 +24,7 @@ export interface DepositReceipt {
   transactionHash: Hash;
   status: "success" | "reverted";
   blockNumber: bigint | null;
+  blockHash: Hash | null;
   logs: readonly DepositReceiptLog[];
 }
 export interface DepositTransaction {
