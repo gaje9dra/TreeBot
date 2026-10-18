@@ -18,11 +18,11 @@ CREATE INDEX IF NOT EXISTS execution_deposit_events_account_asset_idx
 
 -- Financial journal rows are append-only. Corrections must be compensating entries
 -- with a new event key and explicit audit provenance, never UPDATE/DELETE.
-CREATE OR REPLACE FUNCTION treebot_prevent_financial_record_mutation() RETURNS trigger AS $
+CREATE OR REPLACE FUNCTION treebot_prevent_financial_record_mutation() RETURNS trigger AS $$
 BEGIN
   RAISE EXCEPTION '% is append-only; use a compensating journal entry', TG_TABLE_NAME;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS execution_ledger_entries_immutable_update ON execution_ledger_entries;
 CREATE TRIGGER execution_ledger_entries_immutable_update
