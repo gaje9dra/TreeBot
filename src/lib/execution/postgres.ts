@@ -500,6 +500,47 @@ export class PostgresExecutionStore {
           VALUES($1,$2,'withdrawal',LOWER($3),-$4::numeric,137,$5,$6::jsonb)`,
           [row.account_id,"withdrawal:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId+":token",row.asset_address,
             proof.actualAmountBaseUnits,proof.transactionHash.toLowerCase(),evidence]);
+        const inventoryDebit=await c.query(
+          `UPDATE execution_position_inventory SET quantity_base_units=quantity_base_units-$3::numeric,updated_at=NOW()
+           WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) AND quantity_base_units >= $3::numeric
+           RETURNING quantity_base_units::text AS quantity`,
+          [row.account_id,row.asset_address,proof.actualAmountBaseUnits],
+        );
+        const inventoryQ=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[row.account_id,row.asset_address]);
+        const inventoryQuantity=BigInt(inventoryQ.rows[0]?.quantity??"0");
+        const ledgerQ=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[row.account_id,row.asset_address]);
+        const ledgerQuantity=BigInt(ledgerQ.rows[0]?.quantity??"0");
+        const discrepancy=ledgerQuantity-inventoryQuantity;
+        await c.query(
+          "INSERT INTO execution_portfolio_reconciliation(chain_id,account_id,asset_address,ledger_balance,inventory_quantity,discrepancy,status) VALUES(137,$1,LOWER($2),$3::numeric,$4::numeric,$5::numeric,$6)",
+          [row.account_id,row.asset_address,ledgerQuantity.toString(),inventoryQuantity.toString(),discrepancy.toString(),discrepancy===0n?"matched":"mismatch"],
+        );
+        await c.query(
+          `INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+           VALUES($1,LOWER($2),$3::numeric,0,'0x0000000000000000000000000000000000000000',NOW(),'pending')
+           ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET quantity_base_units=EXCLUDED.quantity_base_units,
+             cost_basis_status=CASE WHEN execution_open_positions.cost_basis_status='complete' THEN 'reconciliation_required' ELSE 'pending' END,updated_at=NOW()`,
+          [row.account_id,row.asset_address,inventoryQuantity.toString()],
+        );
+        if(discrepancy!==0n||inventoryDebit.rowCount!==1){
+          const incidentKey="withdrawal-ledger-mismatch:137:"+proof.transactionHash.toLowerCase()+":"+proof.withdrawalId;
+          const amount=(discrepancy<0n?-discrepancy:discrepancy).toString()==="0"?proof.actualAmountBaseUnits:(discrepancy<0n?-discrepancy:discrepancy).toString();
+          const details=JSON.stringify({withdrawalId:proof.withdrawalId,transactionHash:proof.transactionHash,assetAddress:row.asset_address,
+            ledgerBalance:ledgerQuantity.toString(),inventoryQuantity:inventoryQuantity.toString(),discrepancy:discrepancy.toString(),inventoryDebitApplied:inventoryDebit.rowCount===1});
+          await c.query(
+            `INSERT INTO execution_financial_incidents(incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,status,details)
+             VALUES($1,'ledger_mismatch',$2,LOWER($3),$4::numeric,137,$5,$6,'open',$7::jsonb) ON CONFLICT(incident_key) DO NOTHING`,
+            [incidentKey,row.account_id,row.asset_address,amount,proof.transactionHash.toLowerCase(),proof.logIndex,details],
+          );
+          for(const restrictedAccount of [...new Set([String(row.account_id),String(row.source_address)])]){
+            await c.query(
+              `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+               VALUES($1,$2,'ledger_mismatch','active','Withdrawal settlement exposed a ledger/inventory mismatch.',$3::jsonb) ON CONFLICT(restriction_key) DO NOTHING`,
+              [restrictedAccount,incidentKey+":"+restrictedAccount.toLowerCase(),details],
+            );
+          }
+          await c.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+        }
       }
       if(BigInt(proof.gasWei)>0n){
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
