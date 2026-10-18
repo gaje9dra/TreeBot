@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import type { Address, Hash } from "viem";
+import type { Address, Hash, Hex } from "viem";
 import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres";
 import { PolygonDepositScanner, type DepositRangeReader } from "../deposit-scanner";
 
