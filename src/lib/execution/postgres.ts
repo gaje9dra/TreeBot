@@ -3,6 +3,7 @@ import type { Address } from "viem";
 import type { DepositLifecycleRecord, DepositScannerStore } from "./deposit-scanner";
 import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
+import { isIssuedVerifiedDepositProof } from "./deposit-proof";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
@@ -296,7 +297,7 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
         throw new Error("Deposit checkpoint compare-and-swap failed.");
       }
       let inserted = 0;
-      const credited = 0;
+      let credited = 0;
       for (const event of input.observations) {
         const amount = assertPositiveBaseUnits(event.amountBaseUnits, "deposit amount");
         const blockNumber = BigInt(event.blockNumber);
@@ -331,8 +332,92 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
         if (!row) throw new Error("Deposit event conflicts with previously recorded immutable event data.");
         if (row.inserted) inserted++;
         if (row.status === "reconciliation_required") throw new Error("Deposit event block hash changed; checkpoint must not advance.");
-        // Observations never authorize spendable credits. Deposits remain fail-closed until
-        // allocation-aware crediting and PostgreSQL recovery verification are complete.
+        const proof = event.proof;
+        if (proof !== undefined) {
+          if (
+            !isIssuedVerifiedDepositProof(proof) ||
+            proof.chainId !== event.chainId ||
+            proof.transactionHash.toLowerCase() !== event.transactionHash.toLowerCase() ||
+            proof.logIndex !== event.logIndex ||
+            proof.accountId !== event.accountId ||
+            proof.tokenAddress.toLowerCase() !== event.assetAddress.toLowerCase() ||
+            proof.senderAddress.toLowerCase() !== event.senderAddress.toLowerCase() ||
+            proof.recipientAddress.toLowerCase() !== event.vaultAddress.toLowerCase() ||
+            proof.amountBaseUnits !== amount.toString() ||
+            proof.blockNumber !== blockNumber.toString() ||
+            proof.blockHash.toLowerCase() !== event.blockHash.toLowerCase() ||
+            event.confirmations < event.requiredConfirmations ||
+            row.status !== "confirmed"
+          ) {
+            throw new Error("Deposit credit rejected: scanner proof is absent, untrusted, or does not match the persisted event.");
+          }
+          // Serializable transaction plus account/wallet restriction checks closes the
+          // credit path against concurrent incident handling. Every financial write below
+          // and the checkpoint update commit or roll back together.
+          const restricted = await c.query(
+            `SELECT 1 FROM execution_account_restrictions
+             WHERE status='active' AND account_id IN ($1,LOWER($2)) LIMIT 1`,
+            [event.accountId, event.senderAddress],
+          );
+          if (restricted.rowCount) throw new Error("Deposit credit blocked by an active account or wallet restriction.");
+          const eventKey = `deposit:137:${event.transactionHash.toLowerCase()}:${event.logIndex}`;
+          const deposit = await c.query(
+            `INSERT INTO execution_deposit_events
+              (chain_id,transaction_hash,log_index,account_id,asset_address,amount_base_units,from_address,to_address,
+               block_number,confirmed_at,block_hash,vault_address,token_decimals)
+             VALUES(137,$1,$2,$3,LOWER($4),$5,LOWER($6),LOWER($7),$8,NOW(),LOWER($9),LOWER($10),$11)
+             ON CONFLICT(chain_id,transaction_hash,log_index) DO NOTHING RETURNING transaction_hash`,
+            [event.transactionHash.toLowerCase(),event.logIndex,event.accountId,event.assetAddress,amount.toString(),
+              event.senderAddress,event.vaultAddress,blockNumber.toString(),event.blockHash,event.vaultAddress,proof.tokenDecimals],
+          );
+          if (deposit.rowCount === 1) {
+            await c.query(
+              `INSERT INTO execution_ledger_entries
+                (account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+               VALUES($1,$2,'deposit',LOWER($3),$4,137,$5,$6::jsonb)`,
+              [event.accountId,eventKey,event.assetAddress,amount.toString(),event.transactionHash.toLowerCase(),
+                JSON.stringify({ source:"verified_polygon_transfer",logIndex:event.logIndex,blockNumber:blockNumber.toString(),
+                  blockHash:event.blockHash.toLowerCase(),sender:event.senderAddress.toLowerCase(),recipient:event.vaultAddress.toLowerCase(),
+                  tokenDecimals:proof.tokenDecimals,watcherKey:input.watcherKey })],
+            );
+            const marked = await c.query(
+              `UPDATE execution_deposit_lifecycle SET credited_event_key=$5,token_decimals=$6,updated_at=NOW()
+               WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2 AND log_index=$3
+                 AND credited_event_key IS NULL AND status='confirmed' RETURNING transaction_hash`,
+              [input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex,event.accountId,eventKey,proof.tokenDecimals],
+            );
+            if (marked.rowCount !== 1) throw new Error("Deposit lifecycle could not be atomically marked credited.");
+            await c.query(
+              "INSERT INTO execution_audit_events(event_type,details) VALUES('deposit_credited',$1::jsonb)",
+              [JSON.stringify({accountId:event.accountId,eventKey,transactionHash:event.transactionHash.toLowerCase(),
+                logIndex:event.logIndex,amountBaseUnits:amount.toString(),assetAddress:event.assetAddress.toLowerCase(),
+                tokenDecimals:proof.tokenDecimals,watcherKey:input.watcherKey})],
+            );
+            credited++;
+          } else {
+            const existing = await c.query(
+              `SELECT account_id,LOWER(asset_address) AS asset_address,amount_base_units::text,LOWER(from_address) AS from_address,
+                      LOWER(to_address) AS to_address,block_number::text,LOWER(block_hash) AS block_hash,token_decimals
+               FROM execution_deposit_events WHERE chain_id=137 AND transaction_hash=$1 AND log_index=$2`,
+              [event.transactionHash.toLowerCase(),event.logIndex],
+            );
+            const prior = existing.rows[0];
+            if (!prior || prior.account_id !== event.accountId ||
+                prior.asset_address !== event.assetAddress.toLowerCase() || prior.amount_base_units !== amount.toString() ||
+                prior.from_address !== event.senderAddress.toLowerCase() || prior.to_address !== event.vaultAddress.toLowerCase() ||
+                prior.block_number !== blockNumber.toString() || prior.block_hash !== event.blockHash.toLowerCase() ||
+                Number(prior.token_decimals) !== proof.tokenDecimals) {
+              throw new Error("Duplicate deposit identity conflicts with its immutable verified funding provenance.");
+            }
+            const ledger = await c.query("SELECT 1 FROM execution_ledger_entries WHERE event_key=$1", [eventKey]);
+            if (!ledger.rowCount) throw new Error("Deposit event exists without its atomic ledger credit; reconciliation is required.");
+            await c.query(
+              `UPDATE execution_deposit_lifecycle SET credited_event_key=$3,token_decimals=$4,updated_at=NOW()
+               WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2 AND credited_event_key IS NULL`,
+              [input.watcherKey,event.transactionHash.toLowerCase(),eventKey,proof.tokenDecimals],
+            );
+          }
+        }
       }
       await c.query(
         `UPDATE execution_chain_watcher_state SET next_block=$3,last_scanned_block_hash=$4,updated_at=NOW()
