@@ -23,6 +23,8 @@ Set these values through the deployment secret manager or a root-readable enviro
 - `TREEBOT_DEPOSIT_POLL_INTERVAL_MS` (default 10,000; allowed 1,000–60,000)
 - `TREEBOT_DEPOSIT_STALL_AFTER_MS` (default 120,000)
 - `TREEBOT_DEPOSIT_ALERT_WEBHOOK` (HTTPS endpoint)
+- `TREEBOT_ACCOUNTING_QUOTE_TOKEN` (explicit canonical ERC-20 quote asset for trade cost basis)
+- `TREEBOT_TRUSTED_VALUATION_SOURCES_JSON` (JSON array of approved valuation-source identifiers; an empty array disables unrealized P&L)
 - `TREEBOT_DEPOSITS_OPERATOR_APPROVED=true`
 - `TREEBOT_DEPOSITS_SECURITY_REVIEWED=true`
 - `TREEBOT_DEPOSITS_NETWORK_VERIFIED=true`
@@ -68,6 +70,14 @@ FROM execution_worker_alerts
 WHERE resolved_at IS NULL
 ORDER BY last_seen_at DESC;
 ```
+
+## Portfolio accounting behavior and remaining valuation gate
+
+The PostgreSQL ledger remains the cash-affecting source of truth. A separate token-inventory mirror is updated atomically on verified deposits, trades, and confirmed withdrawals; trade and withdrawal reservations fail closed if ledger balances and inventory diverge. Verified trade receipts are checked against the persisted wallet, target, calldata, value, nonce, token transfers, canonical block hash, and a minimum 64-block confirmation policy before settlement is recorded.
+
+The canonical quote token is required for trade preparation. Trades between two non-quote assets are blocked until a trusted conversion path exists. Selling a non-quote asset is allowed only when a complete quote-token cost basis covers its full inventory. Quote-token buys establish cost basis from the exact quote amount spent; sales to the quote token record realized P&L using integer base units. Realized P&L is a memorandum journal entry and is excluded from spendable balances; gas is recorded separately in native POL units.
+
+Cost basis remains explicitly `pending` when a non-quote deposit lacks a verified acquisition valuation. The portfolio snapshot returns unrealized P&L only when inventory matches the ledger, cost basis is complete, and a fresh valuation comes from a configured trusted source. **This repository does not yet include an activated, independently verified valuation-feed worker**, so unrealized P&L and total portfolio valuation must remain unavailable until that source is implemented, tested, and approved. Do not fill missing prices with guessed values.
 
 ## Incident handling
 
