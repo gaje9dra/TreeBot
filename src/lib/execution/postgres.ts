@@ -230,8 +230,9 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      // READ COMMITTED plus the account/asset advisory lock gives each serialized reservation a fresh balance snapshot.
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
+      // READ COMMITTED plus sorted account+wallet asset locks serializes trade and withdrawal reservations.
+      const balanceLockKeys=[...new Set([input.accountId.toLowerCase(),input.sourceAddress.toLowerCase()])].sort();
+      for(const key of balanceLockKeys)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[key,input.token.toLowerCase()]);
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.accountId.toLowerCase()]);
       const duplicate=await c.query(
         "SELECT id,account_id,source_address,asset_address,recipient_address,amount_base_units::text FROM execution_withdrawal_reservations WHERE idempotency_key=$1 FOR UPDATE",
@@ -257,7 +258,7 @@ export class PostgresExecutionStore {
       const recon=await c.query("SELECT status FROM execution_reconciliation WHERE LOWER(wallet_address)=LOWER($1) AND LOWER(token_address)=LOWER($2) ORDER BY reconciled_at DESC LIMIT 1",[input.sourceAddress,input.token]);
       if(recon.rows[0]?.status!=="matched")throw new Error("Withdrawal blocked until chain-to-ledger reconciliation is matched.");
       const balance=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_ledger_entries WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2)",[input.accountId,input.token]);
-      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')",[input.accountId,input.token]);
+      const held=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS v FROM execution_withdrawal_reservations WHERE (account_id=$1 OR LOWER(source_address)=LOWER($3)) AND LOWER(asset_address)=LOWER($2) AND status IN('reserved','submitting','submitted','unknown')",[input.accountId,input.token,input.sourceAddress]);
       const available=BigInt(balance.rows[0]?.v??"0")-BigInt(held.rows[0]?.v??"0");if(available<0n||amount>available)throw new Error("Withdrawal exceeds withdrawable ledger balance.");
       await c.query(`INSERT INTO execution_withdrawal_reservations(id,account_id,source_address,asset_address,recipient_address,amount_base_units,status,idempotency_key)
         VALUES($1,$2,LOWER($3),LOWER($4),LOWER($5),$6,'reserved',$7)`,[input.id,input.accountId,input.sourceAddress,input.token,input.recipient,amount.toString(),input.idempotencyKey]);
@@ -275,9 +276,10 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      const initial=await c.query("SELECT account_id,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[id]);
+      const initial=await c.query("SELECT account_id,source_address,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[id]);
       if(!initial.rows[0])throw new Error("Withdrawal reservation not found.");
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initial.rows[0].account_id),String(initial.rows[0].asset_address).toLowerCase()]);
+      const balanceLockKeys=[...new Set([String(initial.rows[0].account_id).toLowerCase(),String(initial.rows[0].source_address??"").toLowerCase()].filter(Boolean))].sort();
+      for(const key of balanceLockKeys)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[key,String(initial.rows[0].asset_address).toLowerCase()]);
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",["treebot-account-restriction",String(initial.rows[0].account_id).toLowerCase()]);
       const q=await c.query("SELECT status,account_id,source_address,asset_address,transaction_hash,nonce,submission_started_at FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[id]);
       const row=q.rows[0];
@@ -351,9 +353,10 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      const initial=await c.query("SELECT account_id,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[proof.withdrawalId]);
+      const initial=await c.query("SELECT account_id,source_address,asset_address FROM execution_withdrawal_reservations WHERE id=$1",[proof.withdrawalId]);
       if(!initial.rows[0])throw new Error("Withdrawal reservation not found.");
-      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initial.rows[0].account_id),String(initial.rows[0].asset_address).toLowerCase()]);
+      const balanceLockKeys=[...new Set([String(initial.rows[0].account_id).toLowerCase(),String(initial.rows[0].source_address??"").toLowerCase()].filter(Boolean))].sort();
+      for(const key of balanceLockKeys)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[key,String(initial.rows[0].asset_address).toLowerCase()]);
       const q=await c.query("SELECT * FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[proof.withdrawalId]);
       const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
       if(["confirmed","reverted"].includes(String(row.status))){
