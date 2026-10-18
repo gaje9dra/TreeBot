@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { Address } from "viem";
 import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
 
