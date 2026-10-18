@@ -32,6 +32,7 @@ describe("ViemPolygonDepositReader", () => {
       fromBlock: 100n, toBlock: 120n, address: [token], event: "Transfer", recipientTopics: [vault],
     });
     expect(client.getLogs).toHaveBeenCalledWith(expect.objectContaining({ address: [token], fromBlock: 100n, toBlock: 120n }));
+    expect(client.getLogs).toHaveBeenCalledWith(expect.objectContaining({ args: { to: vault } }));
     expect(logs).toEqual([expect.objectContaining({
       tokenAddress: token, senderAddress: sender, recipientAddress: vault, amount: 123n, logIndex: 7,
     })]);

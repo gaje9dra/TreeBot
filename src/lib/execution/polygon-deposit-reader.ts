@@ -57,14 +57,14 @@ export class ViemPolygonDepositReader implements DepositRangeReader {
       if (!isAddress(token)) throw new Error("Configured deposit token address is invalid.");
       return getAddress(token);
     });
-    const normalizedTopics = args.recipientTopics.map((topic) => {
-      if (!isAddress(topic)) throw new Error("Configured vault address is invalid.");
-      return (`0x${"0".repeat(24)}${topic.slice(2).toLowerCase()}`) as Hex;
+    const normalizedRecipients = args.recipientTopics.map((recipient) => {
+      if (!isAddress(recipient)) throw new Error("Configured vault address is invalid.");
+      return getAddress(recipient);
     });
     const logs = await this.publicClient.getLogs({
       address: normalizedTokens,
       event: scanAbi[0],
-      args: { to: normalizedTopics[0] as Hex },
+      args: { to: normalizedRecipients[0] as Address },
       fromBlock: args.fromBlock,
       toBlock: args.toBlock,
     });
