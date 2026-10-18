@@ -21,6 +21,7 @@ type PaperDashboardPayload = {
   trades: PaperTradeRecord[];
   marketDataAvailable: boolean;
   marketDataError?: string;
+  workerAlive: boolean;
 };
 type Eip1193Provider = {
   request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
@@ -284,7 +285,7 @@ export default function HomePage() {
       <div className="grid">
         <Metric icon={<Wallet size={14} />} label="WALLET BALANCE" value={balanceDisplay} meta={address ? (chainId === polygon.id ? "Read from connected wallet on Polygon PoS" : "Switch to Polygon to display eligible balance") : "Connect wallet to read native balance"} />
         <Metric icon={<ShieldCheck size={14} />} label="STARTING CAPITAL" value={capitalDisplay ? (capital!.eligible ? "ELIGIBLE" : "NOT READY") : "150 POL"} meta={capitalDisplay ? `Shortfall incl. gas reserve: ${capital!.shortfallPol.toFixed(4)} POL` : "150 POL minimum + 2 POL gas reserve"} tone={capitalDisplay && capital!.eligible ? "good" : "normal"} />
-        <Metric icon={<Gauge size={14} />} label="PAPER WORKER" value={paperDashboard ? (paperDashboard.control.emergencyStop ? "EMERGENCY STOP" : paperDashboard.control.enabled ? "ENABLED" : "DISABLED") : "UNKNOWN"} meta={paperDashboard ? (paperDashboard.marketDataAvailable ? "Ledger status refreshed · provider mark available" : "Ledger available · provider mark unavailable") : paperDashboardError ?? "Checking durable paper ledger"} tone={paperDashboard?.control.emergencyStop || !paperDashboard || !paperDashboard.control.enabled ? "warn" : "good"} />
+        <Metric icon={<Gauge size={14} />} label="PAPER WORKER" value={paperDashboard ? (paperDashboard.control.emergencyStop ? "EMERGENCY STOP" : !paperDashboard.control.enabled ? "DISABLED" : paperDashboard.workerAlive ? "ENABLED" : "WORKER OFFLINE") : "UNKNOWN"} meta={paperDashboard ? (paperDashboard.workerAlive ? (paperDashboard.marketDataAvailable ? "Recent worker heartbeat · provider mark available" : "Recent worker heartbeat · provider mark unavailable") : "No recent worker heartbeat detected") : paperDashboardError ?? "Checking durable paper ledger"} tone={paperDashboard?.control.emergencyStop || !paperDashboard || (paperDashboard.control.enabled && !paperDashboard.workerAlive) ? "warn" : paperDashboard.control.enabled ? "good" : "warn"} />
         <Metric icon={<Blocks size={14} />} label="NETWORK" value={chain.valid ? "POLYGON POS" : "NOT VERIFIED"} meta={`Expected chain ID 137 · detected ${chainId ?? "unknown"}`} tone={chain.valid ? "good" : "warn"} />
       </div>
 

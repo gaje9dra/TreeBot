@@ -4,6 +4,7 @@ import type { MarketSnapshot, PortfolioState, TradeDecision } from "@/lib/tradin
 export interface PaperControlState {
   enabled: boolean;
   emergencyStop: boolean;
+  lastHeartbeatAt: string | null;
 }
 
 export interface RecordDecisionResult {
@@ -30,6 +31,7 @@ export interface PaperTradeRecord {
 
 export interface PaperDashboardSnapshot {
   control: PaperControlState;
+  workerAlive: boolean;
   portfolio: PortfolioState;
   startingEquityQuote: number;
   realizedPnlQuote: number;
@@ -73,9 +75,17 @@ export class PostgresPaperLedger {
   }
 
   async getControl(): Promise<PaperControlState> {
-    const result = await this.pool.query("SELECT paper_enabled, emergency_stop FROM treebot_control WHERE id = 1");
+    const result = await this.pool.query("SELECT paper_enabled, emergency_stop, last_heartbeat_at FROM treebot_control WHERE id = 1");
     if (!result.rows[0]) throw new Error("Paper ledger schema is missing; run npm run ledger:migrate first.");
-    return { enabled: result.rows[0].paper_enabled === true, emergencyStop: result.rows[0].emergency_stop === true };
+    return {
+      enabled: result.rows[0].paper_enabled === true,
+      emergencyStop: result.rows[0].emergency_stop === true,
+      lastHeartbeatAt: result.rows[0].last_heartbeat_at ? new Date(result.rows[0].last_heartbeat_at).toISOString() : null,
+    };
+  }
+
+  async recordHeartbeat(): Promise<void> {
+    await this.pool.query("UPDATE treebot_control SET last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = 1");
   }
 
   async getPortfolio(pair: string, markPrice?: number, now = Date.now()): Promise<PortfolioState> {
@@ -152,6 +162,9 @@ export class PostgresPaperLedger {
 
   async getDashboard(pair: string, markPrice?: number, now = Date.now()): Promise<PaperDashboardSnapshot> {
     const control = await this.getControl();
+    const heartbeatAt = control.lastHeartbeatAt ? Date.parse(control.lastHeartbeatAt) : 0;
+    const pollMs = Number(process.env.TREEBOT_PAPER_POLL_MS ?? 15_000);
+    const workerAlive = heartbeatAt > 0 && now >= heartbeatAt && now - heartbeatAt <= Math.max(60_000, (Number.isFinite(pollMs) ? pollMs : 15_000) * 3);
     const portfolio = await this.getPortfolio(pair, markPrice, now);
     const startingResult = await this.pool.query("SELECT starting_equity_quote FROM paper_portfolios WHERE pair = $1", [pair]);
     const pnlResult = await this.pool.query(
@@ -160,6 +173,7 @@ export class PostgresPaperLedger {
     );
     return {
       control,
+      workerAlive,
       portfolio,
       startingEquityQuote: numberValue(startingResult.rows[0]?.starting_equity_quote),
       realizedPnlQuote: numberValue(pnlResult.rows[0]?.realized_pnl_quote),

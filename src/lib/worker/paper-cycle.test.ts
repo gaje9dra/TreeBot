@@ -53,7 +53,8 @@ const decision: TradeDecision = {
 
 function makeLedger(control: { enabled: boolean; emergencyStop: boolean }) {
   return {
-    getControl: vi.fn(async () => control),
+    getControl: vi.fn(async () => ({ ...control, lastHeartbeatAt: null })),
+    recordHeartbeat: vi.fn(async () => undefined),
     getPortfolio: vi.fn(async () => portfolio),
     recordDecision: vi.fn(async () => ({ tradeRecorded: true })),
   };
@@ -69,6 +70,7 @@ describe("paper worker cycle", () => {
     });
     expect(result).toEqual({ status: "paused", reason: "Paper trading is disabled." });
     expect(marketLoader).not.toHaveBeenCalled();
+    expect(ledger.recordHeartbeat).toHaveBeenCalledOnce();
     expect(ledger.recordDecision).not.toHaveBeenCalled();
   });
 
@@ -84,6 +86,7 @@ describe("paper worker cycle", () => {
     });
     expect(result.status).toBe("evaluated");
     expect(marketLoader).toHaveBeenCalledOnce();
+    expect(ledger.recordHeartbeat).toHaveBeenCalledOnce();
     expect(evaluate).toHaveBeenCalledOnce();
     expect(ledger.getPortfolio).toHaveBeenCalledWith(market.pair, market.price, now);
     expect(ledger.recordDecision).toHaveBeenCalledWith(market, decision, now);

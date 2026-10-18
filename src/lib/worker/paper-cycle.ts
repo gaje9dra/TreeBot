@@ -5,6 +5,7 @@ import type { PaperControlState, RecordDecisionResult } from "@/lib/ledger/postg
 
 export interface PaperLedger {
   getControl(): Promise<PaperControlState>;
+  recordHeartbeat?(): Promise<void>;
   getPortfolio(pair: string, markPrice: number, now?: number): Promise<PortfolioState>;
   recordDecision(market: MarketSnapshot, decision: TradeDecision, now?: number): Promise<RecordDecisionResult>;
 }
@@ -25,6 +26,7 @@ export async function runPaperCycle(
   now: number,
   dependencies: PaperCycleDependencies,
 ): Promise<PaperCycleResult> {
+  await dependencies.ledger.recordHeartbeat?.();
   const control = await dependencies.ledger.getControl();
   if (!control.enabled || control.emergencyStop) {
     return { status: "paused", reason: control.emergencyStop ? "Emergency stop is active." : "Paper trading is disabled." };

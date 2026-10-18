@@ -2,9 +2,11 @@ CREATE TABLE IF NOT EXISTS treebot_control (
   id SMALLINT PRIMARY KEY CHECK (id = 1),
   paper_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   emergency_stop BOOLEAN NOT NULL DEFAULT TRUE,
+  last_heartbeat_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO treebot_control (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+ALTER TABLE treebot_control ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS paper_portfolios (
   pair TEXT PRIMARY KEY,
