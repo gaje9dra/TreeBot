@@ -194,13 +194,21 @@ export class ZeroExPolygonQuoteAdapter {
     if (value !== 0n) throw new QuoteValidationError("Native transaction value is forbidden for this ERC-20 swap pipeline.");
     const gas = tx.gas !== undefined ? integer(tx.gas, "transaction gas") : undefined;
     const gasPrice = tx.gasPrice !== undefined ? integer(tx.gasPrice, "transaction gas price", true) : undefined;
-    const allowanceIssues = q.issues && typeof q.issues === "object" ? q.issues as Record<string, unknown> : {};
-    const allowanceTarget = optionalAddress(allowanceIssues.allowance, "allowance target");
-    const spenderTarget = optionalAddress(allowanceIssues.allowanceSpender, "allowance spender");
-    if (allowanceTarget && spenderTarget && allowanceTarget !== spenderTarget) {
+    const issues = q.issues && typeof q.issues === "object" ? q.issues as Record<string, unknown> : {};
+    const allowanceIssue = issues.allowance;
+    let reportedSpender: unknown;
+    if (allowanceIssue && typeof allowanceIssue === "object" && !Array.isArray(allowanceIssue)) {
+      reportedSpender = (allowanceIssue as Record<string, unknown>).spender;
+    } else if (allowanceIssue !== undefined && allowanceIssue !== null) {
+      // Reject legacy/malformed shapes instead of treating an untyped value as a spender.
+      throw new QuoteValidationError("Malformed 0x issues.allowance object.");
+    }
+    const allowanceTarget = optionalAddress(reportedSpender, "allowance spender");
+    const explicitAllowanceTarget = optionalAddress(q.allowanceTarget, "allowanceTarget");
+    if (allowanceTarget && explicitAllowanceTarget && allowanceTarget.toLowerCase() !== explicitAllowanceTarget.toLowerCase()) {
       throw new QuoteValidationError("Quote returned conflicting allowance spender fields.");
     }
-    const resolvedAllowanceTarget = spenderTarget ?? allowanceTarget;
+    const resolvedAllowanceTarget = allowanceTarget ?? explicitAllowanceTarget;
     if (resolvedAllowanceTarget && !this.config.allowedTransactionTargets.some((target) => target.toLowerCase() === resolvedAllowanceTarget.toLowerCase())) {
       throw new QuoteValidationError("Allowance spender is not independently allowlisted.");
     }
