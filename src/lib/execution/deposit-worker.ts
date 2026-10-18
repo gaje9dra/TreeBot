@@ -158,7 +158,7 @@ async function heartbeat(pool: Pool, input: {
 async function upsertAlert(pool: Pool, settings: DepositWorkerSettings, input: {
   type: AlertType; severity: "warning" | "critical"; dedupeKey: string; details: Record<string, unknown>;
 }): Promise<boolean> {
-  const existing = await pool.query("SELECT resolved_at,last_notified_at FROM execution_worker_alerts WHERE dedupe_key=$1",[input.dedupeKey]);
+  const existing = await pool.query("SELECT resolved_at,last_notified_at,severity FROM execution_worker_alerts WHERE dedupe_key=$1",[input.dedupeKey]);
   const prior = existing.rows[0];
   const shouldNotify = !prior || prior.resolved_at !== null ||
     !prior.last_notified_at || Date.now() - new Date(prior.last_notified_at).getTime() >= 15 * 60_000;
