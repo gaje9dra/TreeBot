@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import type { Address, Hash } from "viem";
 import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres";
+import { issueVerifiedDepositProof } from "../deposit-proof";
 
 const enabled = process.env.TREEBOT_RUN_POSTGRES_INTEGRATION === "true";
 const describePostgres = enabled ? describe : describe.skip;
@@ -26,6 +27,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     if (!pool) return;
     await pool.query("DELETE FROM execution_account_restrictions WHERE account_id LIKE $1 OR evidence->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_deposit_events WHERE account_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
@@ -227,4 +229,59 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await expect(executionStore.leasePreparedIntent("restricted-worker")).resolves.toBeNull();
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
+
+  it("credits only runtime-issued matching proof and remains idempotent under concurrent workers", async () => {
+    const watcherKey = prefix + "-proof-credit";
+    const accountId = prefix + "-proof-account";
+    const txHash = hash(701);
+    const blockHash = hash(700);
+    await store.getOrCreateCheckpoint({ chainId: 137, watcherKey, initialBlock: 700n });
+    const event = {
+      chainId: 137 as const, transactionHash: txHash, logIndex: 1, accountId,
+      assetAddress: token, senderAddress: sender, vaultAddress: vault, amountBaseUnits: "1234567",
+      blockNumber: "700", blockHash, confirmations: 64, requiredConfirmations: 64,
+    };
+    const forged = { ...event, proof: {
+      chainId: 137, transactionHash: txHash, logIndex: 1, accountId, tokenAddress: token,
+      senderAddress: sender, recipientAddress: vault, amountBaseUnits: "1234567",
+      blockNumber: "700", blockHash, tokenDecimals: 6,
+    } as unknown as import("../deposit-proof").VerifiedDepositProof };
+    await expect(store.commitScannedRange({
+      chainId: 137, watcherKey, expectedNextBlock: 700n, nextBlock: 701n,
+      lastScannedBlockHash: blockHash, observations: [forged],
+    })).rejects.toThrow(/untrusted/);
+    const stateAfterForgery = await pool.query(
+      "SELECT next_block::text FROM execution_chain_watcher_state WHERE chain_id=137 AND watcher_key=$1", [watcherKey],
+    );
+    expect(stateAfterForgery.rows[0].next_block).toBe("700");
+    const proof = issueVerifiedDepositProof({
+      chainId: 137, transactionHash: txHash, logIndex: 1, accountId,
+      tokenAddress: token, senderAddress: sender, recipientAddress: vault,
+      amountBaseUnits: "1234567", blockNumber: "700", blockHash, tokenDecimals: 6,
+    });
+    const verifiedEvent = { ...event, proof };
+    const attempt = () => store.commitScannedRange({
+      chainId: 137, watcherKey, expectedNextBlock: 700n, nextBlock: 701n,
+      lastScannedBlockHash: blockHash, observations: [verifiedEvent],
+    });
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const ledger = await pool.query(
+      "SELECT event_key,amount_base_units::text,details->>'tokenDecimals' AS decimals FROM execution_ledger_entries WHERE account_id=$1 AND entry_type='deposit'",
+      [accountId],
+    );
+    expect(ledger.rows).toEqual([{ event_key: "deposit:137:" + txHash.toLowerCase() + ":1", amount_base_units: "1234567", decimals: "6" }]);
+    const deposit = await pool.query(
+      "SELECT token_decimals,LOWER(block_hash) AS block_hash FROM execution_deposit_events WHERE chain_id=137 AND transaction_hash=$1 AND log_index=1",
+      [txHash],
+    );
+    expect(deposit.rows).toEqual([{ token_decimals: 6, block_hash: blockHash }]);
+    const lifecycle = await pool.query(
+      "SELECT credited_event_key,status FROM execution_deposit_lifecycle WHERE chain_id=137 AND transaction_hash=$1 AND log_index=1",
+      [txHash],
+    );
+    expect(lifecycle.rows).toEqual([{ credited_event_key: "deposit:137:" + txHash.toLowerCase() + ":1", status: "confirmed" }]);
+  });
+
 });
