@@ -20,7 +20,8 @@
     "paper:control": "tsx scripts/paper-control.ts",
     "worker:paper": "tsx src/worker/paper.ts",
     "test:integration": "vitest run src/lib/execution/integration",
-    "ledger:migrate:all": "tsx scripts/migrate-all-ledgers.ts"
+    "ledger:migrate:all": "tsx scripts/migrate-all-ledgers.ts",
+    "worker:deposits": "tsx scripts/deposit-worker.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.87.1",
