@@ -3,7 +3,7 @@ import type { Address } from "viem";
 import type { DepositLifecycleRecord, DepositScannerStore } from "./deposit-scanner";
 import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
-import { isIssuedVerifiedDepositProof } from "./deposit-proof";
+import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
