@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Address, Hash, Hex } from "viem";
+import type { Address, Hash } from "viem";
 import {
   PolygonDepositScanner,
   type DepositRangeReader,
@@ -32,7 +32,7 @@ function fixture() {
       return block;
     }),
     getLogs: vi.fn(async ({ fromBlock, toBlock, address }) =>
-      logs.filter((log) => log.blockNumber >= fromBlock && log.blockNumber <= toBlock && address.some((a) => a.toLowerCase() === log.tokenAddress.toLowerCase()))),
+      logs.filter((log) => log.blockNumber >= fromBlock && log.blockNumber <= toBlock && address.some((a: Address) => a.toLowerCase() === log.tokenAddress.toLowerCase()))),
   };
   let nextBlock = 100n;
   let lastHash: Hash | null = null;
@@ -53,11 +53,6 @@ function fixture() {
     }),
     listActiveDeposits: vi.fn(async () => []),
     reconcileOrphanedDeposits: vi.fn(async () => ({ reversed: 0, exceptions: 0 })),
-    rewindCheckpoint: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
-      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint rewind compare-and-swap mismatch");
-      nextBlock = rewindTo;
-      lastHash = lastScannedBlockHash;
-    }),
     rewindCheckpoint: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
       if (expectedNextBlock !== nextBlock) throw new Error("checkpoint rewind compare-and-swap mismatch");
       nextBlock = rewindTo;
