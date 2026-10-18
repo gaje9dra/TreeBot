@@ -16,7 +16,9 @@ export interface PreparedExecution {
   quote:ValidatedSwapQuote; simulation:TransactionSimulation; recordId:string; status:"prepared"|"already-recorded";
 }
 export interface ExecutionDependencies {
-  quotes:ZeroExPolygonQuoteAdapter; chain:PolygonExecutionReadClient; store:PostgresExecutionStore;
+  quotes: Pick<ZeroExPolygonQuoteAdapter, "getFirmQuote">;
+  chain: Pick<PolygonExecutionReadClient, "simulateExactSwap">;
+  store: Pick<PostgresExecutionStore, "createOrGetIntent" | "recordBroadcast" | "recordSubmissionUnknown" | "recordSettlement">;
   loadRiskState:()=>Promise<ExecutionRiskState>;
   /** Only a separately audited smart-account adapter may be supplied. */
   submitAuthorized?:(simulation:TransactionSimulation,authorization:ExecutionAuthorization)=>Promise<{hash:Hash;nonce:number}>;
@@ -25,7 +27,7 @@ export interface ExecutionDependencies {
 export class PolygonExecutionPipeline {
   constructor(private readonly d:ExecutionDependencies){}
   async prepare(request:ExecutionIntentRequest):Promise<PreparedExecution>{
-    if(![request.owner,request.sellToken,request.buyToken].every(isAddress))throw new Error("Invalid execution address.");
+    if(![request.owner,request.sellToken,request.buyToken].every((address) => isAddress(address)))throw new Error("Invalid execution address.");
     const owner=getAddress(request.owner),sellToken=getAddress(request.sellToken),buyToken=getAddress(request.buyToken);
     const risk=await this.d.loadRiskState();
     if(!risk.tradingEnabled||risk.emergencyStop)throw new Error("Execution is paused by the risk control.");
