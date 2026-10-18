@@ -22,6 +22,8 @@ export interface ExecutionDependencies {
   loadRiskState:()=>Promise<ExecutionRiskState>;
   /** Only a separately audited smart-account adapter may be supplied. */
   submitAuthorized?:(simulation:TransactionSimulation,authorization:ExecutionAuthorization)=>Promise<{hash:Hash;nonce:number}>;
+  /** Must decode and validate the exact quote calldata using operator-reviewed route ABIs. */
+  validateSwapSemantics?:(quote:ValidatedSwapQuote,authorization:ExecutionAuthorization)=>void;
   now?:()=>number;
 }
 export class PolygonExecutionPipeline {
@@ -62,7 +64,10 @@ export class PolygonExecutionPipeline {
       sellAmount:request.sellAmount,transactionTarget:prepared.quote.transaction.to,now:(this.d.now??Date.now)()});
     if(!auth.allowed)throw new Error(`Submission authorization rejected: ${auth.reason}`);
     if(prepared.status!=="prepared")throw new Error("Only a newly prepared intent can be submitted; idempotent replay is not resubmittable.");
+    if(getAddress(request.owner)!==prepared.quote.taker||getAddress(request.sellToken)!==prepared.quote.sellToken||getAddress(request.buyToken)!==prepared.quote.buyToken||BigInt(request.sellAmount)!==prepared.quote.sellAmount)throw new Error("Prepared quote does not match the requested owner, token pair, or exact input amount.");
     if(prepared.quote.slippageBps>risk.maximumSlippageBps||!risk.allowedTargets.some(v=>isAddress(v)&&getAddress(v)===prepared.quote.transaction.to))throw new Error("Submission blocked by current target/slippage policy.");
+    if(!this.d.validateSwapSemantics)throw new Error("Live submission blocked: no reviewed semantic calldata validator is configured.");
+    this.d.validateSwapSemantics(prepared.quote,request.authorization);
     // Last-moment simulation is required after the durable reservation and the live gates.
     const freshRisk=await this.d.loadRiskState();
     if(!freshRisk.tradingEnabled||freshRisk.emergencyStop)throw new Error("Submission blocked by changed risk control.");
@@ -70,6 +75,7 @@ export class PolygonExecutionPipeline {
       sellAmount:request.sellAmount,transactionTarget:prepared.quote.transaction.to,now:(this.d.now??Date.now)()});
     if(!freshAuth.allowed)throw new Error(`Submission authorization rejected: ${freshAuth.reason}`);
     const freshSimulation=await this.d.chain.simulateExactSwap(prepared.quote,request.owner);
+    if(freshSimulation.chainId!==137||getAddress(freshSimulation.from)!==getAddress(request.owner)||getAddress(freshSimulation.to)!==prepared.quote.transaction.to||freshSimulation.data.toLowerCase()!==prepared.quote.transaction.data.toLowerCase()||freshSimulation.value!==prepared.quote.transaction.value)throw new Error("Fresh simulation does not match the exact authorized quote transaction.");
     const result=await this.d.submitAuthorized(freshSimulation,request.authorization);
     try{await this.d.store.recordBroadcast(prepared.recordId,"audited-smart-account-adapter",result.hash,result.nonce);}
     catch(error){
