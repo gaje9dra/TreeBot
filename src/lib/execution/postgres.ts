@@ -124,6 +124,15 @@ export class PostgresExecutionStore {
           WHERE r.status='active'
             AND r.account_id IN (execution_transactions.wallet_address,LOWER(execution_transactions.wallet_address))
         )
+        AND EXISTS (
+          SELECT 1 FROM execution_authorizations a
+          WHERE a.id=execution_transactions.authorization_id AND a.chain_id=137
+            AND LOWER(a.owner_address)=LOWER(execution_transactions.wallet_address)
+            AND a.revoked_at IS NULL AND a.expires_at>NOW()
+            AND a.maximum_sell_amount>=execution_transactions.sell_amount
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_tokens) t WHERE LOWER(t)=LOWER(execution_transactions.sell_token))
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.allowed_targets) t WHERE LOWER(t)=LOWER(execution_transactions.prepared_transaction->>'to'))
+        )
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE execution_transactions t SET lease_owner=$1,lease_expires_at=NOW()+($2::text||' milliseconds')::interval,updated_at=NOW()
       FROM candidate c WHERE t.id=c.id RETURNING t.*`,[workerId,leaseMs]);
