@@ -20,10 +20,10 @@ const highOrCritical = Object.entries(vulnerabilities).filter(([, item]) =>
 );
 const advisoryUrl = "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm";
 const allowedAggregateChain = new Map([
-  ["micromatch", ["braces"]],
-  ["fast-glob", ["micromatch"]],
-  ["@next/eslint-plugin-next", ["fast-glob"]],
-  ["eslint-config-next", ["@next/eslint-plugin-next"]],
+  ["micromatch", "braces"],
+  ["fast-glob", "micromatch"],
+  ["@next/eslint-plugin-next", "fast-glob"],
+  ["eslint-config-next", "@next/eslint-plugin-next"],
 ]);
 const exceptions = [];
 const blockers = [];
@@ -33,11 +33,14 @@ for (const [name, item] of highOrCritical) {
   const exactBracesAdvisory = name === "braces" &&
     item.isDirect === false &&
     item.severity === "high" &&
-    via.some((entry) => typeof entry === "object" && entry.url === advisoryUrl);
+    via.length === 1 &&
+    typeof via[0] === "object" &&
+    via[0].url === advisoryUrl;
 
-  const aggregateOnly = allowedAggregateChain.has(name) &&
-    via.length > 0 &&
-    via.every((entry) => typeof entry === "string" && allowedAggregateChain.get(name).includes(entry));
+  const expectedParent = allowedAggregateChain.get(name);
+  const aggregateOnly = expectedParent !== undefined &&
+    via.length === 1 &&
+    via[0] === expectedParent;
 
   if (exactBracesAdvisory || aggregateOnly) {
     exceptions.push({ name, severity: item.severity, via, nodes: item.nodes ?? [] });
