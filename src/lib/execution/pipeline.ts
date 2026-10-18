@@ -1,8 +1,9 @@
-import { isAddress, getAddress, type Hash } from "viem";
+import { isAddress, getAddress, type Address, type Hash, type Hex } from "viem";
 import type { ValidatedSwapQuote, ZeroExPolygonQuoteAdapter } from "./zero-ex";
 import type { PolygonExecutionReadClient, TransactionSimulation, ReceiptSettlement } from "./evm-client";
 import type { PostgresExecutionStore } from "./postgres";
 import { authorizeExecution, assertLiveExecutionUnavailable, type ExecutionAuthorization } from "./authorization";
+import { verifyTradeSettlement, type TradeSettlementReader } from "./trade-settlement-verifier";
 
 export interface ExecutionRiskState {
   emergencyStop:boolean; tradingEnabled:boolean; maximumSlippageBps:number;
@@ -17,8 +18,9 @@ export interface PreparedExecution {
 }
 export interface ExecutionDependencies {
   quotes: Pick<ZeroExPolygonQuoteAdapter, "getFirmQuote">;
-  chain: Pick<PolygonExecutionReadClient, "simulateExactSwap">;
-  store: Pick<PostgresExecutionStore, "createOrGetIntent" | "recordBroadcast" | "recordSubmissionUnknown" | "recordSettlement">;
+  chain: Pick<PolygonExecutionReadClient, "simulateExactSwap"> & Partial<Pick<PolygonExecutionReadClient, "publicClient">>;
+  store: Pick<PostgresExecutionStore, "createOrGetIntent" | "recordBroadcast" | "recordSubmissionUnknown" | "recordSettlement" | "getExecutionIntentForSettlement" | "recordVerifiedSettlement">;
+  settlementConfirmations?: number;
   loadRiskState:()=>Promise<ExecutionRiskState>;
   /** Only a separately audited smart-account adapter may be supplied. */
   submitAuthorized?:(simulation:TransactionSimulation,authorization:ExecutionAuthorization)=>Promise<{hash:Hash;nonce:number}>;
@@ -84,8 +86,49 @@ export class PolygonExecutionPipeline {
     }
     return result;
   }
-  async reconcileReceipt(recordId:string,settlement:ReceiptSettlement,actualSellAmount:string,actualBuyAmount:string):Promise<void>{
-    await this.d.store.recordSettlement({id:recordId,status:settlement.status,blockNumber:settlement.blockNumber.toString(),
-      actualSellAmount,actualBuyAmount,gasWei:settlement.gasCostWei.toString()});
+  async reconcileReceipt(recordId:string,settlement:ReceiptSettlement):Promise<void>{
+    const intent=await this.d.store.getExecutionIntentForSettlement(recordId);
+    if(!intent.txHash||intent.nonce===null)throw new Error("Trade settlement cannot proceed until transaction hash and nonce are durably recorded.");
+    const publicClient=this.d.chain.publicClient;
+    if(!publicClient)throw new Error("Proof-bearing trade settlement requires a Polygon public client; caller-supplied receipt data is not trusted.");
+    const prepared=intent.preparedTransaction;
+    const target=String(prepared.to??"");
+    const data=String(prepared.data??"");
+    const value=prepared.value===undefined?"0":String(prepared.value);
+    if(!isAddress(target)||!/^0x(?:[0-9a-fA-F]{2})*$/.test(data)||!/^(0|[1-9][0-9]*)$/.test(value)){
+      throw new Error("Persisted prepared transaction is malformed; settlement remains unresolved.");
+    }
+    const reader:TradeSettlementReader={
+      getChainId:()=>publicClient.getChainId(),
+      getTransactionReceipt:async({hash})=>{
+        const receipt=await publicClient.getTransactionReceipt({hash});
+        return {transactionHash:receipt.transactionHash,status:receipt.status==="success"?"success":"reverted",
+          blockNumber:receipt.blockNumber,blockHash:receipt.blockHash,gasUsed:receipt.gasUsed,
+          effectiveGasPrice:receipt.effectiveGasPrice,logs:receipt.logs.map((log)=>({
+            address:log.address,data:log.data,topics:log.topics,logIndex:log.logIndex,
+          }))};
+      },
+      getTransaction:async({hash})=>{
+        const transaction=await publicClient.getTransaction({hash});
+        return {hash:transaction.hash,from:transaction.from,to:transaction.to,input:transaction.input,value:transaction.value,nonce:transaction.nonce};
+      },
+      getBlockNumber:()=>publicClient.getBlockNumber(),
+      getBlock:async({blockNumber})=>{
+        const block=await publicClient.getBlock({blockNumber});
+        if(!block.hash||!block.parentHash)throw new Error("Canonical block is missing a hash.");
+        return {number:block.number,hash:block.hash,parentHash:block.parentHash};
+      },
+    };
+    const proof=await verifyTradeSettlement(reader,{
+      executionId:recordId,transactionHash:intent.txHash as Hash,nonce:intent.nonce,
+      walletAddress:intent.walletAddress as Address,sellToken:intent.sellToken as Address,buyToken:intent.buyToken as Address,
+      reservedSellAmountBaseUnits:intent.sellAmount,transactionTarget:target as Address,transactionData:data as Hex,
+      transactionValueWei:value,requiredConfirmations:this.d.settlementConfirmations??64,
+    });
+    if(proof.blockNumber!==settlement.blockNumber.toString()||proof.status!==settlement.status||proof.gasWei!==settlement.gasCostWei.toString()||
+      proof.transactionHash.toLowerCase()!==settlement.hash.toLowerCase()){
+      throw new Error("Observed receipt summary disagrees with independently verified Polygon settlement evidence.");
+    }
+    await this.d.store.recordVerifiedSettlement(proof);
   }
 }
