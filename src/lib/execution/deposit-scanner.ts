@@ -1,6 +1,6 @@
 import type { Address, Hash, Hex } from "viem";
 import type { DepositChainReader, DepositReceipt } from "./deposit-watcher";
-import { issueVerifiedDepositProof, type VerifiedDepositProof } from "./deposit-proof";
+import type { VerifiedDepositProof } from "./deposit-proof";
 
 export interface ScannedDepositLog {
   chainId: 137;
@@ -88,6 +88,39 @@ export interface DepositScannerStore {
     orphaned: readonly DepositLifecycleRecord[];
     reason: string;
   }): Promise<{ reversed: number; exceptions: number }>;
+}
+
+
+const issuedProofs = new WeakSet<object>();
+
+function issueVerifiedDepositProof(input: VerifiedDepositProof): VerifiedDepositProof {
+  const proof = Object.freeze({ ...input });
+  if (
+    proof.chainId !== 137 ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.transactionHash) ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.blockHash) ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.receiptTransactionHash) ||
+    proof.receiptStatus !== "success" ||
+    !/^(0|[1-9][0-9]*)$/.test(proof.receiptBlockNumber) ||
+    !/^0x[0-9a-fA-F]{64}$/.test(proof.receiptBlockHash) ||
+    proof.receiptTransactionHash.toLowerCase() !== proof.transactionHash.toLowerCase() ||
+    proof.receiptBlockNumber !== proof.blockNumber ||
+    proof.receiptBlockHash.toLowerCase() !== proof.blockHash.toLowerCase() ||
+    !Number.isSafeInteger(proof.logIndex) || proof.logIndex < 0 ||
+    !proof.accountId.trim() ||
+    !/^0x[0-9a-fA-F]{40}$/.test(proof.tokenAddress) ||
+    !/^0x[0-9a-fA-F]{40}$/.test(proof.senderAddress) ||
+    !/^0x[0-9a-fA-F]{40}$/.test(proof.recipientAddress) ||
+    !/^[1-9][0-9]*$/.test(proof.amountBaseUnits) ||
+    !/^(0|[1-9][0-9]*)$/.test(proof.blockNumber) ||
+    !Number.isInteger(proof.tokenDecimals) || proof.tokenDecimals < 0 || proof.tokenDecimals > 36
+  ) throw new Error("Invalid verified deposit proof payload.");
+  issuedProofs.add(proof);
+  return proof;
+}
+
+export function isIssuedVerifiedDepositProof(value: unknown): value is VerifiedDepositProof {
+  return typeof value === "object" && value !== null && issuedProofs.has(value);
 }
 
 const TRANSFER_EVENT_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
