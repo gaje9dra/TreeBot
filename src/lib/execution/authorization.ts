@@ -44,7 +44,7 @@ export function authorizeExecution(
     return { allowed: false, reason: "Amounts must be positive base-unit integers." };
   }
   if (BigInt(intent.sellAmount) > BigInt(authorization.maximumSellAmount)) return { allowed: false, reason: "Sell amount exceeds authorized limit." };
-  if (![intent.sellToken, intent.buyToken, intent.transactionTarget, ...authorization.allowedTokens, ...authorization.allowedTargets].every(isAddress)) {
+  if (![intent.sellToken, intent.buyToken, intent.transactionTarget, ...authorization.allowedTokens, ...authorization.allowedTargets].every((value) => isAddress(value))) {
     return { allowed: false, reason: "Authorization or intent contains an invalid address." };
   }
   const tokens = new Set(authorization.allowedTokens.map((token) => getAddress(token).toLowerCase()));
