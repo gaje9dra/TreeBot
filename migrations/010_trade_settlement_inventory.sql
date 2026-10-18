@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS execution_position_inventory_account_idx
 INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units,updated_at)
 SELECT 137,account_id,LOWER(asset_address),SUM(amount_base_units)::numeric,NOW()
 FROM execution_ledger_entries
-WHERE LOWER(asset_address) <> '0x0000000000000000000000000000000000000000'
+WHERE LOWER(asset_address) <> '0x0000000000000000000000000000000000000000' AND entry_type <> 'realized_pnl'
 GROUP BY account_id,LOWER(asset_address)
 HAVING SUM(amount_base_units) > 0
 ON CONFLICT(chain_id,account_id,asset_address) DO NOTHING;
