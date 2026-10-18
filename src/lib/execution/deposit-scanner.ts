@@ -130,7 +130,9 @@ export interface DepositScannerConfig {
   startBlock: bigint;
   vaultAddress: Address;
   supportedTokenAddresses: readonly Address[];
-  /** Explicit on-chain decimals for each allowlisted token; without this, observations are never credited. */
+  /** Must be explicitly enabled; production also requires TREEBOT_DEPOSITS_ENABLED=true. */
+  creditingEnabled?: boolean;
+  /** Explicit on-chain decimals for each allowlisted token. */
   tokenDecimalsByAddress?: Readonly<Record<string, number>>;
   confirmations: number;
   maxBlockRange: number;
@@ -163,6 +165,9 @@ export class PolygonDepositScanner {
         throw new Error("Token decimals policy must contain valid decimals for allowlisted token addresses only.");
       }
     }
+    if (config.creditingEnabled && !config.supportedTokenAddresses.every((token) => Object.keys(config.tokenDecimalsByAddress ?? {}).some((configured) => configured.toLowerCase() === token.toLowerCase()))) {
+      throw new Error("Deposit crediting requires explicit token decimals for every allowlisted token.");
+    }
     if (!Number.isInteger(config.confirmations) || config.confirmations < 1 || config.confirmations > 10_000) {
       throw new Error("Confirmations must be an integer between 1 and 10000.");
     }
@@ -172,6 +177,10 @@ export class PolygonDepositScanner {
   }
 
   async scanOnce(): Promise<{ fromBlock: string; toBlock: string; inserted: number; credited: number; reversed: number }> {
+    if (!this.config.creditingEnabled) throw new DepositScannerError("Deposit scanner is disabled until explicitly activated.");
+    if (process.env.NODE_ENV !== "test" && process.env.TREEBOT_DEPOSITS_ENABLED !== "true") {
+      throw new DepositScannerError("Production deposit scanning requires TREEBOT_DEPOSITS_ENABLED=true after release prerequisites are approved.");
+    }
     if (await this.chain.getChainId() !== 137) throw new DepositScannerError("Deposit scanner only accepts Polygon chain ID 137.");
     const checkpoint = await this.store.getOrCreateCheckpoint({
       chainId: 137,
