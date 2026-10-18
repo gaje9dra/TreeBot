@@ -9,6 +9,7 @@ const configSchema = z.object({
   depositsSecurityReviewed: z.string().default("false").transform((v) => v === "true"),
   depositsNetworkVerified: z.string().default("false").transform((v) => v === "true"),
   depositAlertWebhook: z.string().default(""),
+  accountingQuoteToken: z.string().default(""),
   minimumCapitalPol: z.coerce.number().positive().default(150),
   gasReservePol: z.coerce.number().nonnegative().default(2),
   maximumTradePol: z.coerce.number().positive().default(5),
@@ -20,6 +21,9 @@ const configSchema = z.object({
 }).superRefine((value, ctx) => {
   if (value.tradingMode === "live" && !value.liveTradingEnabled) {
     ctx.addIssue({ code: "custom", path: ["liveTradingEnabled"], message: "Live mode requires an explicit live-trading enable flag." });
+  }
+  if (value.liveTradingEnabled && !/^0x[0-9a-fA-F]{40}$/.test(value.accountingQuoteToken)) {
+    ctx.addIssue({ code: "custom", path: ["accountingQuoteToken"], message: "Live trading requires a configured canonical accounting quote token." });
   }
   if (value.depositsEnabled) {
     if (!DEPOSIT_FEATURE_AVAILABLE) {
@@ -44,6 +48,7 @@ export function loadConfig(env: ConfigEnvironment = process.env): TreeBotConfig 
     depositsSecurityReviewed: env.TREEBOT_DEPOSITS_SECURITY_REVIEWED ?? "false",
     depositsNetworkVerified: env.TREEBOT_DEPOSITS_NETWORK_VERIFIED ?? "false",
     depositAlertWebhook: env.TREEBOT_DEPOSIT_ALERT_WEBHOOK ?? "",
+    accountingQuoteToken: env.TREEBOT_ACCOUNTING_QUOTE_TOKEN ?? "",
     minimumCapitalPol: env.TREEBOT_MIN_CAPITAL_POL ?? 150,
     gasReservePol: env.TREEBOT_GAS_RESERVE_POL ?? 2,
     maximumTradePol: env.TREEBOT_MAX_TRADE_POL ?? 5,
