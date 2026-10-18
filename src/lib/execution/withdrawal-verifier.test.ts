@@ -58,7 +58,6 @@ describe("verifyWithdrawalSettlement", () => {
       withdrawalId: "withdrawal-1",
       chainId: 137,
       status: "confirmed",
-      amountBaseUnits: undefined,
       reservedAmountBaseUnits: "1234",
       actualAmountBaseUnits: "1234",
       logIndex: 4,
@@ -87,12 +86,15 @@ describe("verifyWithdrawalSettlement", () => {
 
   it("rejects a receipt whose Transfer amount does not match the reservation", async () => {
     const f = fixture();
-    f.receipt.logs = [{
-      address: token,
-      data: ("0x" + BigInt(1235).toString(16).padStart(64, "0")) as Hex,
-      topics: [transferTopic, topicAddress(source), topicAddress(recipient)],
-      logIndex: 4,
-    }];
+    (f.chain.getTransactionReceipt as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...f.receipt,
+      logs: [{
+        address: token,
+        data: ("0x" + BigInt(1235).toString(16).padStart(64, "0")) as Hex,
+        topics: [transferTopic, topicAddress(source), topicAddress(recipient)],
+        logIndex: 4,
+      }],
+    });
     await expect(verifyWithdrawalSettlement(f.chain, f.request)).rejects.toThrow(/exactly one matching token Transfer/);
   });
 
