@@ -721,6 +721,23 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
                   blockHash:event.blockHash.toLowerCase(),sender:event.senderAddress.toLowerCase(),recipient:event.vaultAddress.toLowerCase(),
                   tokenDecimals:proof.tokenDecimals,watcherKey:input.watcherKey })],
             );
+            const inventory=await c.query(
+              `INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units,updated_at)
+               VALUES(137,$1,LOWER($2),$3::numeric,NOW())
+               ON CONFLICT(chain_id,account_id,asset_address) DO UPDATE SET
+                 quantity_base_units=execution_position_inventory.quantity_base_units+EXCLUDED.quantity_base_units,updated_at=NOW()
+               RETURNING quantity_base_units::text AS quantity`,
+              [event.accountId,event.assetAddress,amount.toString()],
+            );
+            await c.query(
+              `INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+               VALUES($1,LOWER($2),$3::numeric,0,'0x0000000000000000000000000000000000000000',NOW(),'pending')
+               ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET
+                 quantity_base_units=EXCLUDED.quantity_base_units,
+                 cost_basis_status=CASE WHEN execution_open_positions.cost_basis_status='complete' THEN 'reconciliation_required' ELSE 'pending' END,
+                 updated_at=NOW()`,
+              [event.accountId,event.assetAddress,String(inventory.rows[0]?.quantity??amount.toString())],
+            );
             const marked = await c.query(
               `UPDATE execution_deposit_lifecycle SET credited_event_key=$4,token_decimals=$5,updated_at=NOW()
                WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2 AND log_index=$3
