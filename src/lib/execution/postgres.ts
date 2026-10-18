@@ -5,6 +5,7 @@ import type { TransactionStatus } from "./lifecycle";
 import { assertNonNegativeBaseUnits, assertPositiveBaseUnits } from "./amounts";
 import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
 import { isIssuedWithdrawalSettlement, type VerifiedWithdrawalSettlement } from "./withdrawal-verifier";
+import { isIssuedVerifiedTradeSettlement, type VerifiedTradeSettlement } from "./trade-settlement-verifier";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
@@ -160,53 +161,149 @@ export class PostgresExecutionStore {
     await this.pool.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'submission_unknown',$2::jsonb)",
       [id,JSON.stringify({message:m,retryAllowed:false})]);
   }
-  async recordSettlement(input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
-    assertNonNegativeBaseUnits(input.actualSellAmount,"actual sell amount");
-    assertNonNegativeBaseUnits(input.actualBuyAmount,"actual buy amount");
-    assertNonNegativeBaseUnits(input.gasWei,"gas amount");
-    if(input.realizedPnlBaseUnits!==undefined&&!/^-?(0|[1-9][0-9]*)$/.test(input.realizedPnlBaseUnits))throw new Error("Invalid realized P&L amount.");
-    if(input.quoteFeeBaseUnits!==undefined)assertNonNegativeBaseUnits(input.quoteFeeBaseUnits,"quote fee");
+  async getExecutionIntentForSettlement(id:string):Promise<StoredExecutionIntent>{
+    const result=await this.pool.query("SELECT * FROM execution_transactions WHERE id=$1",[id]);
+    if(!result.rows[0])throw new Error("Execution intent not found for settlement.");
+    return toRecord(result.rows[0] as Record<string,unknown>);
+  }
+
+  /** Legacy caller-supplied settlement is intentionally disabled. */
+  async recordSettlement(_input:{id:string;status:"confirmed"|"reverted";blockNumber:string;actualSellAmount:string;actualBuyAmount:string;gasWei:string;realizedPnlBaseUnits?:string;quoteFeeBaseUnits?:string}):Promise<void>{
+    throw new Error("Unverified trade settlement is disabled; use the proof-bearing recordVerifiedSettlement path.");
+  }
+
+  async recordVerifiedSettlement(proof:VerifiedTradeSettlement):Promise<{settled:boolean;status:"confirmed"|"reverted"}>{
+    if(!isIssuedVerifiedTradeSettlement(proof))throw new Error("Trade settlement proof was not issued by the trusted Polygon verifier.");
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      const initial=await c.query("SELECT wallet_address,sell_token,buy_token,sell_amount,tx_hash FROM execution_transactions WHERE id=$1",[input.id]);
+      const initial=await c.query("SELECT wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[proof.executionId]);
       const initialRow=initial.rows[0];
-      if(!initialRow?.tx_hash)throw new Error("Settlement requires a recorded transaction hash.");
-      if(input.status==="confirmed"&&BigInt(input.actualSellAmount)!==BigInt(initialRow.sell_amount))throw new Error("Confirmed trade sell amount must match the reserved exact-input amount.");
-      if(input.status==="reverted"&&(input.actualSellAmount!=="0"||input.actualBuyAmount!=="0"))throw new Error("Reverted trade settlement cannot move token principal.");
+      if(!initialRow)throw new Error("Execution intent not found for settlement.");
       const assets=[String(initialRow.sell_token).toLowerCase(),String(initialRow.buy_token).toLowerCase()].sort();
-      for(const asset of assets)await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[String(initialRow.wallet_address).toLowerCase(),asset]);
-      const u=await c.query("UPDATE execution_transactions SET status=$2,confirmation_block=$3,actual_sell_amount=$4,actual_buy_amount=$5,actual_gas_wei=$6,execution_price=CASE WHEN $4::numeric>0 THEN $5::numeric/$4::numeric ELSE NULL END,confirmed_at=CASE WHEN $2='confirmed' THEN NOW() ELSE confirmed_at END,updated_at=NOW() WHERE id=$1 AND status IN('submitted','pending','unknown','replaced')",
-        [input.id,input.status,input.blockNumber,input.actualSellAmount,input.actualBuyAmount,input.gasWei]);
-      if(u.rowCount!==1)throw new Error("Execution intent is not eligible for settlement.");
-      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,$2,$3::jsonb)",
-        [input.id,input.status,JSON.stringify({blockNumber:input.blockNumber,actualSellAmount:input.actualSellAmount,actualBuyAmount:input.actualBuyAmount,gasWei:input.gasWei})]);
-      const q=await c.query("SELECT tx_hash,wallet_address,sell_token,buy_token FROM execution_transactions WHERE id=$1",[input.id]);
-      const row=q.rows[0];if(!row?.tx_hash)throw new Error("Settlement transaction hash missing.");
-      const txHash=String(row.tx_hash);
-      if(input.status==="confirmed"){
+      for(const asset of assets)await c.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))",[String(initialRow.wallet_address).toLowerCase(),asset]);
+      const result=await c.query("SELECT * FROM execution_transactions WHERE id=$1 FOR UPDATE",[proof.executionId]);
+      const row=result.rows[0] as Record<string,unknown>|undefined;
+      if(!row)throw new Error("Execution intent disappeared during settlement.");
+      const txHash=String(row.tx_hash??"").toLowerCase();
+      const status=String(row.status);
+      if(status==="confirmed"||status==="reverted"){
+        const same=status===proof.status&&txHash===proof.transactionHash.toLowerCase()&&Number(row.nonce)===proof.nonce&&
+          String(row.confirmation_block)===proof.blockNumber&&String(row.confirmation_block_hash??"").toLowerCase()===proof.blockHash.toLowerCase()&&
+          String(row.actual_sell_amount??"0")===proof.actualSellAmountBaseUnits&&String(row.actual_buy_amount??"0")===proof.actualBuyAmountBaseUnits&&
+          String(row.actual_gas_wei??"0")===proof.gasWei&&String(row.settlement_status??"")===proof.status;
+        if(!same)throw new Error("Conflicting verified settlement evidence already exists for this execution.");
+        await c.query("COMMIT");return {settled:false,status:proof.status};
+      }
+      if(!["submitted","pending","unknown","replaced"].includes(status))throw new Error("Execution intent is not eligible for verified settlement.");
+      const prepared=(row.prepared_transaction??{}) as Record<string,unknown>;
+      const preparedValue=prepared.value===undefined?"0":String(prepared.value);
+      if(txHash!==proof.transactionHash.toLowerCase()||Number(row.nonce)!==proof.nonce||
+        String(row.wallet_address).toLowerCase()!==proof.walletAddress.toLowerCase()||
+        String(row.sell_token).toLowerCase()!==proof.sellToken.toLowerCase()||
+        String(row.buy_token).toLowerCase()!==proof.buyToken.toLowerCase()||
+        String(row.sell_amount)!==proof.reservedSellAmountBaseUnits||
+        String(prepared.to??"").toLowerCase()!==proof.transactionTarget.toLowerCase()||
+        String(prepared.data??"").toLowerCase()!==proof.transactionData.toLowerCase()||
+        BigInt(preparedValue)!==BigInt(proof.transactionValueWei)){
+        throw new Error("Verified settlement proof does not match the immutable execution intent.");
+      }
+      if(proof.confirmations<proof.requiredConfirmations)throw new Error("Verified settlement proof does not meet the required finality policy.");
+      const evidence=JSON.stringify({
+        chainId:proof.chainId,transactionHash:proof.transactionHash,nonce:proof.nonce,status:proof.status,
+        walletAddress:proof.walletAddress,sellToken:proof.sellToken,buyToken:proof.buyToken,
+        transactionTarget:proof.transactionTarget,transactionData:proof.transactionData,transactionValueWei:proof.transactionValueWei,
+        reservedSellAmountBaseUnits:proof.reservedSellAmountBaseUnits,actualSellAmountBaseUnits:proof.actualSellAmountBaseUnits,
+        actualBuyAmountBaseUnits:proof.actualBuyAmountBaseUnits,gasWei:proof.gasWei,blockNumber:proof.blockNumber,
+        blockHash:proof.blockHash,confirmations:proof.confirmations,requiredConfirmations:proof.requiredConfirmations,
+        sellTransferLogIndexes:proof.sellTransferLogIndexes,buyTransferLogIndexes:proof.buyTransferLogIndexes,
+        gasUsed:proof.gasUsed,effectiveGasPriceWei:proof.effectiveGasPriceWei,
+      });
+      const updated=await c.query(
+        `UPDATE execution_transactions SET status=$2,confirmation_block=$3,confirmation_block_hash=$4,
+          actual_sell_amount=$5,actual_buy_amount=$6,actual_gas_wei=$7,
+          execution_price=CASE WHEN $5::numeric>0 THEN $6::numeric/$5::numeric ELSE NULL END,
+          settlement_status=$2,settlement_evidence=$8::jsonb,settlement_verified_at=NOW(),
+          confirmed_at=CASE WHEN $2='confirmed' THEN NOW() ELSE confirmed_at END,updated_at=NOW()
+         WHERE id=$1 AND status IN('submitted','pending','unknown','replaced') RETURNING id`,
+        [proof.executionId,proof.status,proof.blockNumber,proof.blockHash,proof.actualSellAmountBaseUnits,proof.actualBuyAmountBaseUnits,proof.gasWei,evidence],
+      );
+      if(updated.rowCount!==1)throw new Error("Execution intent changed while verified settlement was being recorded.");
+      await c.query("INSERT INTO execution_audit_events(transaction_id,event_type,details) VALUES($1,'trade_settlement_verified',$2::jsonb)",
+        [proof.executionId,evidence]);
+
+      const accountId=String(row.wallet_address);
+      if(proof.status==="confirmed"){
+        const sellInventory=await c.query(
+          `UPDATE execution_position_inventory SET quantity_base_units=quantity_base_units-$3::numeric,updated_at=NOW()
+           WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) AND quantity_base_units >= $3::numeric
+           RETURNING quantity_base_units::text AS quantity`,
+          [accountId,proof.sellToken,proof.actualSellAmountBaseUnits],
+        );
+        await c.query(
+          `INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units,updated_at)
+           VALUES(137,$1,LOWER($2),$3::numeric,NOW())
+           ON CONFLICT(chain_id,account_id,asset_address) DO UPDATE SET quantity_base_units=execution_position_inventory.quantity_base_units+EXCLUDED.quantity_base_units,updated_at=NOW()`,
+          [accountId,proof.buyToken,proof.actualBuyAmountBaseUnits],
+        );
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'trade_sell',LOWER($3),-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":sell",row.sell_token,input.actualSellAmount,txHash,JSON.stringify({executionId:input.id})]);
+          VALUES($1,$2,'trade_sell',LOWER($3),-$4::numeric,137,$5,$6::jsonb)`,
+          [accountId,proof.transactionHash+":sell",proof.sellToken,proof.actualSellAmountBaseUnits,proof.transactionHash,evidence]);
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'trade_buy',LOWER($3),$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":buy",row.buy_token,input.actualBuyAmount,txHash,JSON.stringify({executionId:input.id})]);
-        if(BigInt(input.gasWei)>0n)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":gas",input.gasWei,txHash,JSON.stringify({executionId:input.id})]);
-        if(input.quoteFeeBaseUnits&&BigInt(input.quoteFeeBaseUnits)>0n)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'fee',LOWER($3),-$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":fee",row.buy_token,input.quoteFeeBaseUnits,txHash,JSON.stringify({executionId:input.id})]);
-        if(input.realizedPnlBaseUnits&&input.realizedPnlBaseUnits!=="0")await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'realized_pnl',LOWER($3),$4::numeric,137,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":pnl",row.buy_token,input.realizedPnlBaseUnits,txHash,JSON.stringify({executionId:input.id})]);
-      }else if(BigInt(input.gasWei)>0n){
+          VALUES($1,$2,'trade_buy',LOWER($3),$4::numeric,137,$5,$6::jsonb)`,
+          [accountId,proof.transactionHash+":buy",proof.buyToken,proof.actualBuyAmountBaseUnits,proof.transactionHash,evidence]);
+        if(BigInt(proof.gasWei)>0n)await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb)`,
+          [accountId,proof.transactionHash+":gas",proof.gasWei,proof.transactionHash,evidence]);
+        const sellQuantity=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[accountId,proof.sellToken]);
+        const buyQuantity=await c.query("SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2)",[accountId,proof.buyToken]);
+        const syncPosition=async(asset:string,quantity:string)=>{
+          await c.query(
+            `INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+             VALUES($1,LOWER($2),$3::numeric,0,'0x0000000000000000000000000000000000000000',NOW(),'pending')
+             ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET quantity_base_units=EXCLUDED.quantity_base_units,
+               cost_basis_status=CASE WHEN execution_open_positions.cost_basis_status='complete' THEN 'reconciliation_required' ELSE 'pending' END,updated_at=NOW()`,
+            [accountId,asset,quantity],
+          );
+        };
+        await syncPosition(proof.sellToken,String(sellQuantity.rows[0]?.quantity??"0"));
+        await syncPosition(proof.buyToken,String(buyQuantity.rows[0]?.quantity??"0"));
+
+        const reconcileAsset=async(asset:string,inventoryQuantity:string)=>{
+          const ledger=await c.query("SELECT COALESCE(SUM(amount_base_units),0)::text AS quantity FROM execution_ledger_entries WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2)",[accountId,asset]);
+          const ledgerQuantity=BigInt(ledger.rows[0]?.quantity??"0"), inventory=BigInt(inventoryQuantity);
+          const discrepancy=ledgerQuantity-inventory;
+          await c.query(
+            "INSERT INTO execution_portfolio_reconciliation(chain_id,account_id,asset_address,ledger_balance,inventory_quantity,discrepancy,status) VALUES(137,$1,LOWER($2),$3::numeric,$4::numeric,$5::numeric,$6)",
+            [accountId,asset,ledgerQuantity.toString(),inventory.toString(),discrepancy.toString(),discrepancy===0n?"matched":"mismatch"],
+          );
+          if(discrepancy!==0n||!sellInventory.rowCount&&asset.toLowerCase()===proof.sellToken.toLowerCase()){
+            const incidentKey="trade-ledger-mismatch:137:"+proof.transactionHash.toLowerCase()+":"+asset.toLowerCase();
+            const amount=(discrepancy<0n?-discrepancy:discrepancy).toString();
+            const details=JSON.stringify({executionId:proof.executionId,transactionHash:proof.transactionHash,assetAddress:asset,ledgerBalance:ledgerQuantity.toString(),inventoryQuantity:inventory.toString(),discrepancy:discrepancy.toString(),sellInventoryDebitApplied:!!sellInventory.rowCount});
+            await c.query(
+              `INSERT INTO execution_financial_incidents(incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,status,details)
+               VALUES($1,'ledger_mismatch',$2,LOWER($3),$4::numeric,137,$5,NULL,'open',$6::jsonb) ON CONFLICT(incident_key) DO NOTHING`,
+              [incidentKey,accountId,asset,amount,proof.transactionHash,details],
+            );
+            await c.query(
+              `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+               VALUES($1,$2,'ledger_mismatch','active','Trade settlement exposed a ledger/inventory mismatch.',$3::jsonb) ON CONFLICT(restriction_key) DO NOTHING`,
+              [accountId,incidentKey,details],
+            );
+            await c.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+          }
+        };
+        await reconcileAsset(proof.sellToken,String(sellQuantity.rows[0]?.quantity??"0"));
+        await reconcileAsset(proof.buyToken,String(buyQuantity.rows[0]?.quantity??"0"));
+      }else if(BigInt(proof.gasWei)>0n){
         await c.query(`INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details)
-          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb) ON CONFLICT(event_key) DO NOTHING`,
-          [row.wallet_address,txHash+":gas",input.gasWei,txHash,JSON.stringify({executionId:input.id,reverted:true})]);
+          VALUES($1,$2,'gas','0x0000000000000000000000000000000000000000',-$3::numeric,137,$4,$5::jsonb)`,
+          [accountId,proof.transactionHash+":gas",proof.gasWei,proof.transactionHash,evidence]);
       }
       await c.query("COMMIT");
-    }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
+      return {settled:true,status:proof.status};
+    }catch(error){await c.query("ROLLBACK").catch(()=>undefined);throw error;}finally{c.release();}
   }
 
   async recordDepositEvent(_input: {
