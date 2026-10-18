@@ -86,7 +86,7 @@ export class TrustedDepositWatcher {
 
   async verifyAndCredit(request: VerifyDepositRequest): Promise<{ credited: boolean; amount: string; confirmations: number }> {
     if (!/^0x[0-9a-fA-F]{64}$/.test(request.transactionHash)) throw new DepositVerificationError("Invalid transaction hash.");
-    if (![request.accountAddress, request.tokenAddress, request.vaultAddress].every(isAddress)) {
+    if (![request.accountAddress, request.tokenAddress, request.vaultAddress].every((address) => isAddress(address))) {
       throw new DepositVerificationError("Invalid account, token or vault address.");
     }
     if (!/^[1-9][0-9]*$/.test(request.minimumAmount)) throw new DepositVerificationError("Minimum amount must be positive base units.");
@@ -131,7 +131,7 @@ export class TrustedDepositWatcher {
     for (const log of receipt.logs) {
       if (!isAddress(log.address) || getAddress(log.address) !== token || log.logIndex === null) continue;
       try {
-        const decoded = decodeEventLog({ abi: erc20TransferAbi, eventName: "Transfer", data: log.data, topics: [...log.topics] });
+        const decoded = decodeEventLog({ abi: erc20TransferAbi, eventName: "Transfer", data: log.data, topics: [...log.topics] as [Hex, ...Hex[]] });
         const args = decoded.args as { from: Address; to: Address; value: bigint };
         if (getAddress(args.from) === account && getAddress(args.to) === vault && args.value === callAmount) {
           matchingLogs.push({ ...args, logIndex: log.logIndex });
