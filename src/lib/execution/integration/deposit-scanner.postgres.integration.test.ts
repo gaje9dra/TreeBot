@@ -218,6 +218,14 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       riskChecks: {},
       preparedTransaction: {},
     })).rejects.toThrow(/financial-integrity restriction/);
+    await pool.query("UPDATE execution_transactions SET status='failed' WHERE id=$1", [intentId]);
+    await pool.query(
+      `INSERT INTO execution_transactions
+       (id,idempotency_key,chain_id,wallet_address,sell_token,buy_token,side,sell_amount,quote,authorization_id,risk_checks,prepared_transaction,status)
+       VALUES($1,$2,137,$3,$4,$5,'sell',1,'{}'::jsonb,$6,'{}'::jsonb,'{}'::jsonb,'prepared')`,
+      [`${prefix}-preexisting-restricted-intent`, `${prefix}-preexisting-restricted-key`, sender, token, vault, authorizationId],
+    );
+    await expect(executionStore.leasePreparedIntent("restricted-worker")).resolves.toBeNull();
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 });
