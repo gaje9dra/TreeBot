@@ -56,11 +56,11 @@ function fixture() {
       return { inserted, credited: 0, reversed: 0 };
     }),
     listActiveDeposits: vi.fn(async () => []),
-    reconcileOrphanedDeposits: vi.fn(async () => ({ reversed: 0, exceptions: 0 })),
-    rewindCheckpoint: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
-      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint rewind compare-and-swap mismatch");
+    recoverReorg: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
+      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint recovery compare-and-swap mismatch");
       nextBlock = rewindTo;
       lastHash = lastScannedBlockHash;
+      return { reversed: 0, exceptions: 0 };
     }),
   };
   const scanner = new PolygonDepositScanner(chain, store, {
