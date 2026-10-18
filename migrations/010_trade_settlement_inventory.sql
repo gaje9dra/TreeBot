@@ -40,6 +40,14 @@ GROUP BY account_id,LOWER(asset_address)
 HAVING SUM(amount_base_units) > 0
 ON CONFLICT(chain_id,account_id,asset_address) DO NOTHING;
 
+INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+SELECT account_id,asset_address,quantity_base_units,0,'0x0000000000000000000000000000000000000000',NOW(),'pending'
+FROM execution_position_inventory
+ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET
+  quantity_base_units=EXCLUDED.quantity_base_units,
+  cost_basis_status='pending',
+  updated_at=NOW();
+
 CREATE TABLE IF NOT EXISTS execution_portfolio_reconciliation (
   id BIGSERIAL PRIMARY KEY,
   chain_id INTEGER NOT NULL CHECK (chain_id = 137),
