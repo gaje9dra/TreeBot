@@ -5,6 +5,7 @@ import { PostgresDepositScannerStore, PostgresExecutionStore } from "../postgres
 import { PolygonDepositScanner, type DepositRangeReader } from "../deposit-scanner";
 import { verifyWithdrawalSettlement, type WithdrawalChainReader } from "../withdrawal-verifier";
 import { parseDepositWorkerSettings, runDepositWorker } from "../deposit-worker";
+import { verifyTradeSettlement, type TradeSettlementReader } from "../trade-settlement-verifier";
 
 const enabled = process.env.TREEBOT_RUN_POSTGRES_INTEGRATION === "true";
 const describePostgres = enabled ? describe : describe.skip;
@@ -15,6 +16,25 @@ const sender = "0x0000000000000000000000000000000000000030" as Address;
 const hashSeed = BigInt(Date.now()) * 1_000_000n + BigInt(process.pid);
 const hash = (n: number) => `0x${(hashSeed + BigInt(n)).toString(16).padStart(64, "0")}` as Hash;
 const integrationWallet = ("0x" + (hashSeed + 6000n).toString(16).padStart(40, "0").slice(-40)) as Address;
+const tradeTransferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
+const addressTopic = (address: Address): Hex => ("0x" + address.slice(2).toLowerCase().padStart(64, "0")) as Hex;
+const uintWord = (value: bigint): Hex => ("0x" + value.toString(16).padStart(64, "0")) as Hex;
+function tradeReader(input:{txHash:Hash;nonce:number;wallet:Address;target:Address;sellToken:Address;buyToken:Address;sellAmount:bigint;buyAmount:bigint;blockNumber:bigint}):TradeSettlementReader{
+  const blockHash=hash(Number(input.blockNumber));
+  return {
+    getChainId:async()=>137,
+    getTransactionReceipt:async()=>({
+      transactionHash:input.txHash,status:"success",blockNumber:input.blockNumber,blockHash,gasUsed:100_000n,effectiveGasPrice:30n,
+      logs:[
+        {address:input.sellToken,data:uintWord(input.sellAmount),topics:[tradeTransferTopic,addressTopic(input.wallet),addressTopic(input.target)],logIndex:1},
+        {address:input.buyToken,data:uintWord(input.buyAmount),topics:[tradeTransferTopic,addressTopic(input.target),addressTopic(input.wallet)],logIndex:2},
+      ],
+    }),
+    getTransaction:async()=>({hash:input.txHash,from:input.wallet,to:input.target,input:"0x12345678" as Hex,value:0n,nonce:input.nonce}),
+    getBlockNumber:async()=>1000n,
+    getBlock:async({blockNumber})=>({number:blockNumber,hash:hash(Number(blockNumber)),parentHash:hash(Number(blockNumber-1n))}),
+  };
+}
 
 let pool: Pool;
 let store: PostgresDepositScannerStore;
@@ -37,6 +57,11 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await pool.query("DELETE FROM execution_financial_incidents WHERE account_id LIKE $1 OR details->>'accountId' LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_reconciliation WHERE wallet_address LIKE $1 OR LOWER(wallet_address) IN (LOWER($2),LOWER($3))", [`${prefix}%`, "0x0000000000000000000000000000000000000040", integrationWallet]);
     await pool.query("DELETE FROM execution_audit_events WHERE transaction_id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_trade_accounting WHERE execution_id LIKE $1", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_portfolio_reconciliation WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1)", [`${prefix}%`]);
+    await pool.query("DELETE FROM execution_position_inventory WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
+    await pool.query("DELETE FROM execution_open_positions WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
+    await pool.query("DELETE FROM execution_ledger_entries WHERE event_key LIKE $1 OR transaction_hash IN (SELECT tx_hash FROM execution_transactions WHERE id LIKE $1) OR account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_authorizations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_deposit_lifecycle WHERE watcher_key LIKE $1", [`${prefix}%`]);
@@ -469,9 +494,84 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       [wallet, token],
     );
     expect(BigInt(heldTrades.rows[0].amount) + BigInt(heldWithdrawals.rows[0].amount)).toBe(700n);
+    await pool.query("UPDATE execution_transactions SET status='failed' WHERE id=$1 AND status='prepared'",[prefix+"-trade-race"]);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 
+
+
+  it("settles trades only from verified receipts and computes quote-token realized P&L", async () => {
+    const wallet = ("0x" + (hashSeed + 7000n).toString(16).padStart(40, "0").slice(-40)) as Address;
+    const recipient = "0x0000000000000000000000000000000000000090" as Address;
+    const executionStore = new PostgresExecutionStore(pool, token);
+    await pool.query("UPDATE execution_control SET emergency_stop=FALSE WHERE id=1");
+    try {
+      await pool.query(
+        "INSERT INTO execution_ledger_entries(account_id,event_key,entry_type,asset_address,amount_base_units,chain_id,transaction_hash,details) VALUES($1,$2,'deposit',$3,1000,137,$4,'{}'::jsonb)",
+        [wallet,prefix+"-trade-accounting-funding",token,hash(1100)],
+      );
+      await pool.query("INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units) VALUES(137,$1,LOWER($2),1000)",[wallet,token]);
+      await pool.query(
+        "INSERT INTO execution_authorizations(id,owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount,expires_at,authorized_by) VALUES($1,$2,137,$3::jsonb,$4::jsonb,1000,NOW()+INTERVAL '1 hour','owner_wallet')",
+        [prefix+"-trade-accounting-auth-1",wallet,JSON.stringify([token,buyToken]),JSON.stringify([recipient])],
+      );
+      const firstId=prefix+"-trade-accounting-buy";
+      await executionStore.createOrGetIntent({
+        id:firstId,idempotencyKey:firstId+"-key",walletAddress:wallet,sellToken:token,buyToken,sellAmount:"100",
+        quote:{provider:"test"},authorizationId:prefix+"-trade-accounting-auth-1",riskChecks:{passed:true},
+        preparedTransaction:{to:recipient,data:"0x12345678",value:"0"},
+      });
+      const firstLease=await executionStore.leasePreparedIntent("trade-accounting-worker-1");
+      expect(firstLease?.id).toBe(firstId);
+      const firstHash=hash(1101);
+      await executionStore.recordBroadcast(firstId,"trade-accounting-worker-1",firstHash,5);
+      const firstProof=await verifyTradeSettlement(tradeReader({
+        txHash:firstHash,nonce:5,wallet,target:recipient,sellToken:token,buyToken,sellAmount:100n,buyAmount:200n,blockNumber:900n,
+      }),{
+        executionId:firstId,transactionHash:firstHash,nonce:5,walletAddress:wallet,sellToken:token,buyToken,
+        reservedSellAmountBaseUnits:"100",transactionTarget:recipient,transactionData:"0x12345678",transactionValueWei:"0",requiredConfirmations:64,
+      });
+      await executionStore.recordVerifiedSettlement(firstProof);
+
+      await pool.query(
+        "INSERT INTO execution_authorizations(id,owner_address,chain_id,allowed_tokens,allowed_targets,maximum_sell_amount,expires_at,authorized_by) VALUES($1,$2,137,$3::jsonb,$4::jsonb,1000,NOW()+INTERVAL '1 hour','owner_wallet')",
+        [prefix+"-trade-accounting-auth-2",wallet,JSON.stringify([token,buyToken]),JSON.stringify([recipient])],
+      );
+      const secondId=prefix+"-trade-accounting-sell";
+      await executionStore.createOrGetIntent({
+        id:secondId,idempotencyKey:secondId+"-key",walletAddress:wallet,sellToken:buyToken,buyToken:token,sellAmount:"100",
+        quote:{provider:"test"},authorizationId:prefix+"-trade-accounting-auth-2",riskChecks:{passed:true},
+        preparedTransaction:{to:recipient,data:"0x12345678",value:"0"},
+      });
+      const secondLease=await executionStore.leasePreparedIntent("trade-accounting-worker-2");
+      expect(secondLease?.id).toBe(secondId);
+      const secondHash=hash(1102);
+      await executionStore.recordBroadcast(secondId,"trade-accounting-worker-2",secondHash,6);
+      const secondProof=await verifyTradeSettlement(tradeReader({
+        txHash:secondHash,nonce:6,wallet,target:recipient,sellToken:buyToken,buyToken:token,sellAmount:100n,buyAmount:70n,blockNumber:901n,
+      }),{
+        executionId:secondId,transactionHash:secondHash,nonce:6,walletAddress:wallet,sellToken:buyToken,buyToken:token,
+        reservedSellAmountBaseUnits:"100",transactionTarget:recipient,transactionData:"0x12345678",transactionValueWei:"0",requiredConfirmations:64,
+      });
+      await executionStore.recordVerifiedSettlement(secondProof);
+
+      await expect(executionStore.getLedgerBalance(wallet,token)).resolves.toBe("970");
+      await expect(executionStore.getLedgerBalance(wallet,buyToken)).resolves.toBe("100");
+      const basis=await pool.query(
+        "SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE account_id=$1 AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3)",
+        [wallet,buyToken,token],
+      );
+      expect(basis.rows[0]).toEqual({quantity:"100",cost_basis:"50",cost_basis_status:"complete"});
+      const accounting=await pool.query("SELECT realized_pnl_quote_base_units::text AS pnl,accounting_status FROM execution_trade_accounting WHERE execution_id=$1",[secondId]);
+      expect(accounting.rows[0]).toEqual({pnl:"20",accounting_status:"complete"});
+      const snapshot=await executionStore.getPortfolioSnapshot(wallet,token);
+      expect(snapshot.realizedPnlByQuoteAsset).toContainEqual({quoteAssetAddress:token.toLowerCase(),realizedPnlBaseUnits:"20"});
+      expect(snapshot.pendingTradeAccountingCount).toBe(0);
+      expect(snapshot.valuationComplete).toBe(false);
+    } finally {
+      await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
+    }
+  });
 
   it("records supervised worker heartbeats and persists incident alerts", async () => {
     const workerKey = prefix + "-worker-health";
