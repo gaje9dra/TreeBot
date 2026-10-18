@@ -28,10 +28,12 @@ const snapshot = {
 };
 
 function fetchResponse(body: unknown, status = 200) {
-  const mock = vi.fn(async () => new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  }));
+  const mock = vi.fn(async (_input: URL | RequestInfo, _init?: RequestInit) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    }),
+  );
   return { fetcher: mock as unknown as typeof fetch, mock };
 }
 
@@ -45,9 +47,9 @@ describe("configured market-data provider", () => {
     });
     expect(result).toEqual(snapshot);
     expect(mock).toHaveBeenCalledOnce();
-    const [, init] = mock.mock.calls[0] as unknown as [URL, RequestInit];
-    expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-test-key");
-    expect(String(mock.mock.calls[0][0])).toContain("pair=WMATIC%2FUSDC");
+    const call = mock.mock.calls[0];
+    expect(new Headers(call[1]?.headers).get("authorization")).toBe("Bearer secret-test-key");
+    expect(String(call[0])).toContain("pair=WMATIC%2FUSDC");
   });
 
   it("rejects missing configuration and insecure provider URLs", async () => {
