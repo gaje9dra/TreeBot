@@ -58,6 +58,11 @@ function fixture() {
       nextBlock = rewindTo;
       lastHash = lastScannedBlockHash;
     }),
+    rewindCheckpoint: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
+      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint rewind compare-and-swap mismatch");
+      nextBlock = rewindTo;
+      lastHash = lastScannedBlockHash;
+    }),
   };
   const scanner = new PolygonDepositScanner(chain, store, {
     watcherKey: "vault-main",
