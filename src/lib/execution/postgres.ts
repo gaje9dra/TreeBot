@@ -26,6 +26,7 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.walletAddress.toLowerCase()]);
       const restriction = await c.query(
         `SELECT 1 FROM execution_account_restrictions
          WHERE account_id IN ($1,LOWER($1)) AND status='active' LIMIT 1`,
@@ -150,6 +151,7 @@ export class PostgresExecutionStore {
       await c.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       // Serialize all reservations for a given account/asset, including the empty-ledger case.
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",[input.accountId,input.token.toLowerCase()]);
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", input.accountId.toLowerCase()]);
       const control=await c.query("SELECT emergency_stop FROM execution_control WHERE id=1 FOR UPDATE");
       if(!control.rows[0]||control.rows[0].emergency_stop!==false)throw new Error("Withdrawal blocked by execution emergency stop.");
       const restriction=await c.query(
@@ -354,6 +356,10 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           // Serializable transaction plus account/wallet restriction checks closes the
           // credit path against concurrent incident handling. Every financial write below
           // and the checkpoint update commit or roll back together.
+          const restrictionKeys = [event.accountId.toLowerCase(), event.senderAddress.toLowerCase()].sort();
+          for (const restrictionKey of restrictionKeys) {
+            await c.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", restrictionKey]);
+          }
           const restricted = await c.query(
             `SELECT 1 FROM execution_account_restrictions
              WHERE status='active' AND account_id IN ($1,LOWER($2)) LIMIT 1`,
@@ -381,10 +387,10 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
                   tokenDecimals:proof.tokenDecimals,watcherKey:input.watcherKey })],
             );
             const marked = await c.query(
-              `UPDATE execution_deposit_lifecycle SET credited_event_key=$5,token_decimals=$6,updated_at=NOW()
+              `UPDATE execution_deposit_lifecycle SET credited_event_key=$4,token_decimals=$5,updated_at=NOW()
                WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2 AND log_index=$3
                  AND credited_event_key IS NULL AND status='confirmed' RETURNING transaction_hash`,
-              [input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex,event.accountId,eventKey,proof.tokenDecimals],
+              [input.watcherKey,event.transactionHash.toLowerCase(),event.logIndex,eventKey,proof.tokenDecimals],
             );
             if (marked.rowCount !== 1) throw new Error("Deposit lifecycle could not be atomically marked credited.");
             await c.query(
@@ -501,6 +507,10 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
           throw new Error("Deposit changed while reorg recovery was being prepared; transaction aborted.");
         }
         if (row.credited_event_key) {
+          const restrictionKeys = [event.accountId.toLowerCase(), event.senderAddress.toLowerCase()].sort();
+          for (const restrictionKey of restrictionKeys) {
+            await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["treebot-account-restriction", restrictionKey]);
+          }
           await client.query(
             `UPDATE execution_deposit_lifecycle SET status='reconciliation_required',updated_at=NOW()
              WHERE chain_id=$1 AND watcher_key=$2 AND transaction_hash=$3 AND log_index=$4`,
