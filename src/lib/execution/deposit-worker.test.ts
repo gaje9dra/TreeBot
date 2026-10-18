@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Address, Hash } from "viem";
+import type { Hash } from "viem";
 import {
   assertDepositWorkerActivation,
   assertRpcProviderAgreement,
@@ -81,8 +81,8 @@ function fakeReader(input: { chainId?: number; head: bigint; hash?: Hash }): Dep
 describe("deposit worker RPC agreement", () => {
   it("checks the same finalized block against both RPC providers", async () => {
     const primary = fakeReader({ head: 100n });
-    const fallback = fakeReader({ head: 99n });
-    await expect(assertRpcProviderAgreement(primary, fallback, 10, 5n)).resolves.toBe(90n);
+    const fallback = fakeReader({ head: 100n });
+    await expect(assertRpcProviderAgreement(primary, fallback, 10, 0n)).resolves.toBe(91n);
   });
 
   it("fails closed when providers disagree on the finalized block hash", async () => {
