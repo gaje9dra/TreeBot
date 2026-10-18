@@ -637,7 +637,10 @@ export interface DepositRangeCheckpoint {
  * checkpoint only within database transactions.
  */
 export class PostgresDepositScannerStore implements DepositScannerStore {
-  constructor(private readonly pool: Pool) {}
+  private readonly accountingQuoteToken:string|null;
+  constructor(private readonly pool: Pool,accountingQuoteToken=process.env.TREEBOT_ACCOUNTING_QUOTE_TOKEN??""){
+    this.accountingQuoteToken=/^0x[0-9a-fA-F]{40}$/.test(accountingQuoteToken)?accountingQuoteToken.toLowerCase():null;
+  }
 
   async getOrCreateCheckpoint(input: {
     chainId: 137;
@@ -796,6 +799,19 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
                   blockHash:event.blockHash.toLowerCase(),sender:event.senderAddress.toLowerCase(),recipient:event.vaultAddress.toLowerCase(),
                   tokenDecimals:proof.tokenDecimals,watcherKey:input.watcherKey })],
             );
+            const priorInventoryQ=await c.query(
+              "SELECT quantity_base_units::text AS quantity FROM execution_position_inventory WHERE chain_id=137 AND account_id=$1 AND LOWER(asset_address)=LOWER($2) FOR UPDATE",
+              [event.accountId,event.assetAddress],
+            );
+            const priorInventory=BigInt(priorInventoryQ.rows[0]?.quantity??"0");
+            const quotePosition=this.accountingQuoteToken?await c.query(
+              "SELECT quantity_base_units::text AS quantity,cost_basis_quote_base_units::text AS cost_basis,cost_basis_status FROM execution_open_positions WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) FOR UPDATE",
+              [event.accountId,event.assetAddress,this.accountingQuoteToken],
+            ):null;
+            const quoteBasisComplete=!!this.accountingQuoteToken&&event.assetAddress.toLowerCase()===this.accountingQuoteToken&&
+              ((!!quotePosition?.rows[0]&&quotePosition.rows[0].cost_basis_status==="complete"&&BigInt(String(quotePosition.rows[0].quantity))===priorInventory)||
+               (!quotePosition?.rows[0]&&priorInventory===0n));
+            const priorCostBasis=quoteBasisComplete&&quotePosition?.rows[0]?BigInt(String(quotePosition.rows[0].cost_basis)):0n;
             const inventory=await c.query(
               `INSERT INTO execution_position_inventory(chain_id,account_id,asset_address,quantity_base_units,updated_at)
                VALUES(137,$1,LOWER($2),$3::numeric,NOW())
@@ -813,6 +829,22 @@ export class PostgresDepositScannerStore implements DepositScannerStore {
                  updated_at=NOW()`,
               [event.accountId,event.assetAddress,String(inventory.rows[0]?.quantity??amount.toString())],
             );
+            if(this.accountingQuoteToken&&event.assetAddress.toLowerCase()===this.accountingQuoteToken){
+              await c.query(
+                `INSERT INTO execution_open_positions(account_id,asset_address,quantity_base_units,cost_basis_quote_base_units,quote_asset_address,updated_at,cost_basis_status)
+                 VALUES($1,LOWER($2),$3::numeric,$4::numeric,$5,NOW(),$6)
+                 ON CONFLICT(account_id,asset_address,quote_asset_address) DO UPDATE SET
+                   quantity_base_units=EXCLUDED.quantity_base_units,cost_basis_quote_base_units=EXCLUDED.cost_basis_quote_base_units,
+                   cost_basis_status=EXCLUDED.cost_basis_status,updated_at=NOW()`,
+                [event.accountId,event.assetAddress,String(inventory.rows[0]?.quantity??amount.toString()),
+                  (quoteBasisComplete?priorCostBasis+amount:0n).toString(),this.accountingQuoteToken,quoteBasisComplete?"complete":"pending"],
+              );
+            }else if(this.accountingQuoteToken){
+              await c.query(
+                "UPDATE execution_open_positions SET cost_basis_status='reconciliation_required',updated_at=NOW() WHERE LOWER(account_id)=LOWER($1) AND LOWER(asset_address)=LOWER($2) AND LOWER(quote_asset_address)=LOWER($3) AND cost_basis_status='complete'",
+                [event.accountId,event.assetAddress,this.accountingQuoteToken],
+              );
+            }
             const marked = await c.query(
               `UPDATE execution_deposit_lifecycle SET credited_event_key=$4,token_decimals=$5,updated_at=NOW()
                WHERE chain_id=137 AND watcher_key=$1 AND transaction_hash=$2 AND log_index=$3
