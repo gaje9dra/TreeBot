@@ -155,13 +155,38 @@ async function heartbeat(pool: Pool, input: {
   );
 }
 
+export function shouldNotifyDepositAlert(
+  prior: { resolvedAt: Date | string | null; lastNotifiedAt: Date | string | null; severity: "warning" | "critical" } | null,
+  severity: "warning" | "critical",
+  now = Date.now(),
+  repeatIntervalMs = 15 * 60_000,
+): boolean {
+  if (!Number.isFinite(now) || !Number.isFinite(repeatIntervalMs) || repeatIntervalMs < 0) {
+    throw new Error("Alert notification timing must be finite and non-negative.");
+  }
+  if (!prior || prior.resolvedAt !== null) return true;
+  // Severity escalation must page immediately instead of waiting for the warning throttle.
+  if (severity === "critical" && prior.severity !== "critical") return true;
+  if (prior.lastNotifiedAt === null) return true;
+  const lastNotified = new Date(prior.lastNotifiedAt).getTime();
+  if (!Number.isFinite(lastNotified)) return true;
+  return now - lastNotified >= repeatIntervalMs;
+}
+
 async function upsertAlert(pool: Pool, settings: DepositWorkerSettings, input: {
   type: AlertType; severity: "warning" | "critical"; dedupeKey: string; details: Record<string, unknown>;
 }): Promise<boolean> {
   const existing = await pool.query("SELECT resolved_at,last_notified_at,severity FROM execution_worker_alerts WHERE dedupe_key=$1",[input.dedupeKey]);
   const prior = existing.rows[0];
-  const shouldNotify = !prior || prior.resolved_at !== null ||
-    !prior.last_notified_at || Date.now() - new Date(prior.last_notified_at).getTime() >= 15 * 60_000;
+  const shouldNotify = shouldNotifyDepositAlert(
+    prior ? {
+      resolvedAt: prior.resolved_at as Date | string | null,
+      lastNotifiedAt: prior.last_notified_at as Date | string | null,
+      severity: prior.severity as "warning" | "critical",
+    } : null,
+    input.severity,
+    Date.now(),
+  );
   await pool.query(
     `INSERT INTO execution_worker_alerts(worker_key,alert_type,severity,dedupe_key,details,last_notified_at)
      VALUES($1,$2,$3,$4,$5::jsonb,CASE WHEN $6 THEN NOW() ELSE NULL END)
