@@ -238,11 +238,23 @@ export async function verifyTradeSettlement(
       throw new Error("Trade Transfer log identity is invalid.");
     }
     if (address === sellToken) {
-      if (from === wallet) { sellOut += value; sellIndexes.push(log.logIndex); }
-      if (to === wallet) { sellIn += value; sellIndexes.push(log.logIndex); }
+      if (from === wallet) {
+        sellOut += value;
+        sellIndexes.push(log.logIndex);
+      }
+      if (to === wallet) {
+        sellIn += value;
+        sellIndexes.push(log.logIndex);
+      }
     } else {
-      if (to === wallet) { buyIn += value; buyIndexes.push(log.logIndex); }
-      if (from === wallet) { buyOut += value; buyIndexes.push(log.logIndex); }
+      if (to === wallet) {
+        buyIn += value;
+        buyIndexes.push(log.logIndex);
+      }
+      if (from === wallet) {
+        buyOut += value;
+        buyIndexes.push(log.logIndex);
+      }
     }
   }
   const actualSell = receipt.status === "success" ? sellOut - sellIn : 0n;
