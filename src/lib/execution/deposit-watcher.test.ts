@@ -9,7 +9,6 @@ import {
   type Hex,
 } from "viem";
 import {
-  DepositVerificationError,
   TrustedDepositWatcher,
   type DepositChainReader,
   type DepositReceipt,
@@ -19,6 +18,7 @@ const account = "0x0000000000000000000000000000000000000003" as Address;
 const token = "0x0000000000000000000000000000000000000001" as Address;
 const vault = "0x0000000000000000000000000000000000000004" as Address;
 const hash = `0x${"1".repeat(64)}` as Hash;
+const minedBlockHash = `0x${"2".repeat(64)}` as Hash;
 const abi = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
@@ -31,6 +31,7 @@ function fixture() {
     transactionHash: hash,
     status: "success",
     blockNumber: 100n,
+    blockHash: minedBlockHash,
     logs: [{
       address: token,
       topics: topics as readonly Hex[],
@@ -48,6 +49,7 @@ function fixture() {
       input: encodeFunctionData({ abi, functionName: "transfer", args: [vault, amount] }),
     })),
     getBlockNumber: vi.fn(async () => 163n),
+    getBlock: vi.fn(async ({ blockNumber }) => ({ number: blockNumber, hash: minedBlockHash, parentHash: hash })),
   };
   const store = { recordDepositEvent: vi.fn(async () => ({ credited: true })) };
   return { chain, store, receipt };
@@ -59,6 +61,7 @@ const request = {
   tokenAddress: token,
   vaultAddress: vault,
   minimumAmount: "2000000",
+  supportedTokenAddresses: [token],
 };
 
 describe("TrustedDepositWatcher", () => {
@@ -76,6 +79,23 @@ describe("TrustedDepositWatcher", () => {
       confirmed: true,
       requiredConfirmations: 64,
     }));
+  });
+
+  it("rejects unsupported tokens before querying for credit", async () => {
+    const { chain, store } = fixture();
+    await expect(new TrustedDepositWatcher(chain, store, 1).verifyAndCredit({ ...request, supportedTokenAddresses: [vault] }))
+      .rejects.toThrow(/allowlist/);
+    expect(store.recordDepositEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects a receipt whose block hash is not canonical", async () => {
+    const { chain, store } = fixture();
+    (chain.getBlock as ReturnType<typeof vi.fn>).mockResolvedValue({
+      number: 100n, hash, parentHash: hash,
+    });
+    await expect(new TrustedDepositWatcher(chain, store, 1).verifyAndCredit(request))
+      .rejects.toThrow(/not canonical/);
+    expect(store.recordDepositEvent).not.toHaveBeenCalled();
   });
 
   it("does not credit before the confirmation threshold", async () => {

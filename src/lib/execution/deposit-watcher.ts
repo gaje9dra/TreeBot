@@ -24,6 +24,7 @@ export interface DepositReceipt {
   transactionHash: Hash;
   status: "success" | "reverted";
   blockNumber: bigint | null;
+  blockHash: Hash | null;
   logs: readonly DepositReceiptLog[];
 }
 export interface DepositTransaction {
@@ -37,6 +38,7 @@ export interface DepositChainReader {
   getTransactionReceipt(args: { hash: Hash }): Promise<DepositReceipt>;
   getTransaction(args: { hash: Hash }): Promise<DepositTransaction>;
   getBlockNumber(): Promise<bigint>;
+  getBlock(args: { blockNumber: bigint }): Promise<{ number: bigint; hash: Hash; parentHash: Hash }>;
 }
 export interface DepositStore {
   recordDepositEvent(input: {
@@ -59,6 +61,8 @@ export interface VerifyDepositRequest {
   tokenAddress: string;
   vaultAddress: string;
   minimumAmount: string;
+  /** Must be a token explicitly enabled in the deployment configuration. */
+  supportedTokenAddresses: readonly string[];
 }
 
 export class DepositVerificationError extends Error {
@@ -94,6 +98,9 @@ export class TrustedDepositWatcher {
     const account = getAddress(request.accountAddress);
     const token = getAddress(request.tokenAddress);
     const vault = getAddress(request.vaultAddress);
+    if (!request.supportedTokenAddresses.some((configured) => isAddress(configured) && getAddress(configured) === token)) {
+      throw new DepositVerificationError("Token is not in the configured deposit allowlist.");
+    }
     const hash = request.transactionHash as Hash;
 
     if (await this.chain.getChainId() !== 137) throw new DepositVerificationError("Deposits are accepted only on Polygon chain ID 137.");
@@ -105,8 +112,15 @@ export class TrustedDepositWatcher {
     if (receipt.transactionHash.toLowerCase() !== hash.toLowerCase() || transaction.hash.toLowerCase() !== hash.toLowerCase()) {
       throw new DepositVerificationError("RPC returned a mismatched transaction identity.");
     }
-    if (receipt.status !== "success" || receipt.blockNumber === null) {
-      throw new DepositVerificationError("Deposit transaction is pending, failed or has no mined block.");
+    if (receipt.status !== "success" || receipt.blockNumber === null || !receipt.blockHash) {
+      throw new DepositVerificationError("Deposit transaction is pending, failed or has no mined block hash.");
+    }
+    const canonicalBlock = await this.chain.getBlock({ blockNumber: receipt.blockNumber });
+    if (
+      canonicalBlock.number !== receipt.blockNumber ||
+      canonicalBlock.hash.toLowerCase() !== receipt.blockHash.toLowerCase()
+    ) {
+      throw new DepositVerificationError("Deposit receipt block is not canonical.");
     }
     if (transaction.to === null || getAddress(transaction.to) !== token) {
       throw new DepositVerificationError("Only a direct ERC-20 transfer to the configured token contract is supported.");

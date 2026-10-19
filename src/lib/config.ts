@@ -5,6 +5,11 @@ const configSchema = z.object({
   tradingMode: z.enum(["paper", "live"]).default("paper"),
   liveTradingEnabled: z.string().default("false").transform((v) => v === "true"),
   depositsEnabled: z.string().default("false").transform((v) => v === "true"),
+  depositsOperatorApproved: z.string().default("false").transform((v) => v === "true"),
+  depositsSecurityReviewed: z.string().default("false").transform((v) => v === "true"),
+  depositsNetworkVerified: z.string().default("false").transform((v) => v === "true"),
+  depositAlertWebhook: z.string().default(""),
+  accountingQuoteToken: z.string().default(""),
   minimumCapitalPol: z.coerce.number().positive().default(150),
   gasReservePol: z.coerce.number().nonnegative().default(2),
   maximumTradePol: z.coerce.number().positive().default(5),
@@ -17,8 +22,16 @@ const configSchema = z.object({
   if (value.tradingMode === "live" && !value.liveTradingEnabled) {
     ctx.addIssue({ code: "custom", path: ["liveTradingEnabled"], message: "Live mode requires an explicit live-trading enable flag." });
   }
+  if (value.liveTradingEnabled && !/^0x[0-9a-fA-F]{40}$/.test(value.accountingQuoteToken)) {
+    ctx.addIssue({ code: "custom", path: ["accountingQuoteToken"], message: "Live trading requires a configured canonical accounting quote token." });
+  }
   if (value.depositsEnabled) {
-    ctx.addIssue({ code: "custom", path: ["depositsEnabled"], message: "Deposits are disabled until custody and contract audits are complete." });
+    if (!DEPOSIT_FEATURE_AVAILABLE) {
+      ctx.addIssue({ code: "custom", path: ["depositsEnabled"], message: "Deposits are disabled in this build until the explicit release gate is approved." });
+    }
+    if (!value.depositsOperatorApproved || !value.depositsSecurityReviewed || !value.depositsNetworkVerified || !value.depositAlertWebhook.trim()) {
+      ctx.addIssue({ code: "custom", path: ["depositsEnabled"], message: "Deposits are disabled until operator approval, independent security review, network verification and alert delivery are configured." });
+    }
   }
 });
 
@@ -31,6 +44,11 @@ export function loadConfig(env: ConfigEnvironment = process.env): TreeBotConfig 
     tradingMode: env.TREEBOT_TRADING_MODE ?? "paper",
     liveTradingEnabled: env.TREEBOT_LIVE_TRADING_ENABLED ?? "false",
     depositsEnabled: env.TREEBOT_DEPOSITS_ENABLED ?? "false",
+    depositsOperatorApproved: env.TREEBOT_DEPOSITS_OPERATOR_APPROVED ?? "false",
+    depositsSecurityReviewed: env.TREEBOT_DEPOSITS_SECURITY_REVIEWED ?? "false",
+    depositsNetworkVerified: env.TREEBOT_DEPOSITS_NETWORK_VERIFIED ?? "false",
+    depositAlertWebhook: env.TREEBOT_DEPOSIT_ALERT_WEBHOOK ?? "",
+    accountingQuoteToken: env.TREEBOT_ACCOUNTING_QUOTE_TOKEN ?? "",
     minimumCapitalPol: env.TREEBOT_MIN_CAPITAL_POL ?? 150,
     gasReservePol: env.TREEBOT_GAS_RESERVE_POL ?? 2,
     maximumTradePol: env.TREEBOT_MAX_TRADE_POL ?? 5,

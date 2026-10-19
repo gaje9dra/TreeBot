@@ -1,0 +1,163 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Address, Hash, Hex } from "viem";
+import {
+  PolygonDepositScanner,
+  type DepositRangeReader,
+  type DepositScannerStore,
+  type DepositScanBlock,
+  type DepositLogCandidate,
+} from "./deposit-scanner";
+
+const vault = "0x0000000000000000000000000000000000000010" as Address;
+const token = "0x0000000000000000000000000000000000000020" as Address;
+const sender = "0x0000000000000000000000000000000000000030" as Address;
+const tx = `0x${"a".repeat(64)}` as Hash;
+const blockHash = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as Hash;
+const topicAddress = (address: Address) => `0x${address.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
+const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as Hex;
+
+function fixture() {
+  const blocks = new Map<bigint, DepositScanBlock>();
+  for (let i = 0n; i <= 200n; i++) blocks.set(i, { number: i, hash: blockHash(Number(i)), parentHash: blockHash(Number(i - 1n < 0n ? 0n : i - 1n)) });
+  const logs: DepositLogCandidate[] = [{
+    transactionHash: tx, blockNumber: 100n, blockHash: blockHash(100), logIndex: 3,
+    tokenAddress: token, senderAddress: sender, recipientAddress: vault, amount: 123456n,
+  }];
+  const chain: DepositRangeReader = {
+    getChainId: vi.fn(async () => 137),
+    getTransactionReceipt: vi.fn(async () => ({
+      transactionHash: tx, status: "success" as const, blockNumber: 100n, blockHash: blockHash(100),
+      logs: [{ address: token, data: `0x${123456n.toString(16).padStart(64, "0")}` as Hex,
+        topics: [transferTopic, topicAddress(sender), topicAddress(vault)] as [Hex, Hex, Hex], logIndex: 3 }],
+    })),
+    getTransaction: vi.fn(async () => { throw new Error("unused"); }),
+    getBlockNumber: vi.fn(async () => 170n),
+    getBlock: vi.fn(async ({ blockNumber }) => {
+      const block = blocks.get(blockNumber);
+      if (!block) throw new Error("unknown block");
+      return block;
+    }),
+    getLogs: vi.fn(async ({ fromBlock, toBlock, address }) =>
+      logs.filter((log) => log.blockNumber >= fromBlock && log.blockNumber <= toBlock && address.some((a: Address) => a.toLowerCase() === log.tokenAddress.toLowerCase()))),
+  };
+  let nextBlock = 100n;
+  let lastHash: Hash | null = null;
+  const observations = new Map<string, { accountId: string; amount: string; blockHash: Hash; status: string }>();
+  const store: DepositScannerStore = {
+    getOrCreateCheckpoint: vi.fn(async () => ({ nextBlock, lastScannedBlockHash: lastHash })),
+    commitScannedRange: vi.fn(async ({ expectedNextBlock, nextBlock: next, lastScannedBlockHash, observations: found }) => {
+      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint compare-and-swap mismatch");
+      let inserted = 0;
+      for (const o of found) {
+        const key = `${o.chainId}:${o.transactionHash}:${o.logIndex}`;
+        if (!observations.has(key)) { observations.set(key, { accountId: o.accountId, amount: o.amountBaseUnits, blockHash: o.blockHash, status: "confirmed" }); inserted++; }
+      }
+      nextBlock = next; lastHash = lastScannedBlockHash;
+      return { inserted, credited: 0, reversed: 0 };
+    }),
+    listActiveDeposits: vi.fn(async () => []),
+    recoverReorg: vi.fn(async ({ expectedNextBlock, nextBlock: rewindTo, lastScannedBlockHash }) => {
+      if (expectedNextBlock !== nextBlock) throw new Error("checkpoint recovery compare-and-swap mismatch");
+      nextBlock = rewindTo;
+      lastHash = lastScannedBlockHash;
+      return { reversed: 0, exceptions: 0 };
+    }),
+  };
+  const scanner = new PolygonDepositScanner(chain, store, {
+    watcherKey: "vault-main",
+    startBlock: 100n,
+    vaultAddress: vault,
+    supportedTokenAddresses: [token],
+    creditingEnabled: true,
+    tokenDecimalsByAddress: { [token.toLowerCase()]: 6 },
+    confirmations: 64,
+    maxBlockRange: 100,
+    accountForSender: async (address) => address.toLowerCase() === sender.toLowerCase() ? "account-1" : null,
+  });
+  return { scanner, chain, store, observations, getNext: () => nextBlock, getLastHash: () => lastHash };
+}
+
+describe("PolygonDepositScanner", () => {
+  it("fails closed unless deposit scanning is explicitly enabled", async () => {
+    const f = fixture();
+    const disabled = new PolygonDepositScanner(f.chain, f.store, {
+      watcherKey: "disabled", startBlock: 100n, vaultAddress: vault, supportedTokenAddresses: [token],
+      tokenDecimalsByAddress: { [token.toLowerCase()]: 6 }, confirmations: 64, maxBlockRange: 100,
+      accountForSender: async () => "account-1",
+    });
+    await expect(disabled.scanOnce()).rejects.toThrow(/disabled until explicitly activated/);
+    expect(f.chain.getChainId).not.toHaveBeenCalled();
+  });
+  it("scans block ranges, checks canonical log blocks, and advances a durable checkpoint", async () => {
+    const f = fixture();
+    await expect(f.scanner.scanOnce()).resolves.toEqual({
+      fromBlock: "100", toBlock: "107", inserted: 1, credited: 0, reversed: 0,
+    });
+    expect(f.chain.getLogs).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 100n, toBlock: 107n }));
+    expect(f.getNext()).toBe(108n);
+    expect(f.getLastHash()).toBe(blockHash(107));
+    expect(f.observations.size).toBe(1);
+  });
+
+
+  it("persists an unmapped sender as non-creditable evidence for operations alerts", async () => {
+    const f = fixture();
+    const scanner = new PolygonDepositScanner(f.chain, f.store, {
+      watcherKey: "unmapped-vault",
+      startBlock: 100n,
+      vaultAddress: vault,
+      supportedTokenAddresses: [token],
+      creditingEnabled: true,
+      tokenDecimalsByAddress: { [token.toLowerCase()]: 6 },
+      confirmations: 64,
+      maxBlockRange: 100,
+      accountForSender: async () => null,
+    });
+    await expect(scanner.scanOnce()).resolves.toMatchObject({ inserted: 1, credited: 0 });
+    const call = (f.store.commitScannedRange as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      observations: Array<{ accountId: string; proof?: unknown }>;
+    };
+    expect(call.observations).toHaveLength(1);
+    expect(call.observations[0]!.accountId).toBe("unmapped:" + sender.toLowerCase());
+    expect(call.observations[0]!.proof).toBeUndefined();
+  });
+
+  it("rejects a candidate when the receipt log at the exact index disagrees", async () => {
+    const f = fixture();
+    (f.chain.getTransactionReceipt as ReturnType<typeof vi.fn>).mockResolvedValue({
+      transactionHash: tx, status: "success", blockNumber: 100n, blockHash: blockHash(100),
+      logs: [{ address: token, data: `0x${123456n.toString(16).padStart(64, "0")}` as Hex,
+        topics: [transferTopic, topicAddress(sender), topicAddress(vault)] as [Hex, Hex, Hex], logIndex: 4 }],
+    });
+    await expect(f.scanner.scanOnce()).rejects.toThrow(/exact Transfer log/);
+    expect(f.store.commitScannedRange).not.toHaveBeenCalled();
+    expect(f.getNext()).toBe(100n);
+  });
+
+  it("rejects non-Polygon RPC", async () => {
+    const f = fixture();
+    (f.chain.getChainId as ReturnType<typeof vi.fn>).mockResolvedValue(1);
+    await expect(f.scanner.scanOnce()).rejects.toThrow(/chain ID 137/);
+    expect(f.store.commitScannedRange).not.toHaveBeenCalled();
+  });
+
+  it("does not advance checkpoint when a scanned log has a noncanonical block hash", async () => {
+    const f = fixture();
+    const logs = f.chain.getLogs as ReturnType<typeof vi.fn>;
+    logs.mockResolvedValue([{
+      transactionHash: tx, blockNumber: 100n, blockHash: blockHash(99), logIndex: 3,
+      tokenAddress: token, senderAddress: sender, recipientAddress: vault, amount: 123456n,
+    }]);
+    await expect(f.scanner.scanOnce()).rejects.toThrow(/not canonical/);
+    expect(f.store.commitScannedRange).not.toHaveBeenCalled();
+    expect(f.getNext()).toBe(100n);
+  });
+
+  it("does not scan ranges that have not reached finality", async () => {
+    const f = fixture();
+    (f.chain.getBlockNumber as ReturnType<typeof vi.fn>).mockResolvedValue(100n);
+    const result = await f.scanner.scanOnce();
+    expect(result.inserted).toBe(0);
+    expect(f.chain.getLogs).not.toHaveBeenCalled();
+  });
+});

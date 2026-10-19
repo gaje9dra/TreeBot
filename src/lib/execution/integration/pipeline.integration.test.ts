@@ -68,6 +68,7 @@ describe("execution safety integration boundaries", () => {
     const deps: ExecutionDependencies = {
       quotes:quoteClient as unknown as ExecutionDependencies["quotes"], chain:chain as unknown as ExecutionDependencies["chain"], store:store as unknown as ExecutionDependencies["store"], loadRiskState,
       submitAuthorized:vi.fn(async()=>({hash:("0x"+"1".repeat(64)) as `0x${string}`,nonce:1})),
+      validateSwapSemantics: vi.fn(() => {}),
       now:()=>1_800_000_000_000,
     };
     const api = new PolygonExecutionPipeline(deps);

@@ -10,6 +10,15 @@ const migrations = [
   "migrations/001_paper_ledger.sql",
   "migrations/002_execution_lifecycle.sql",
   "migrations/003_execution_controls.sql",
+  "migrations/004_fund_lifecycle.sql",
+  "migrations/005_deposit_scanner_recovery.sql",
+  "migrations/006_account_restrictions.sql",
+  "migrations/007_proof_bearing_deposit_credit.sql",
+  "migrations/008_withdrawal_settlement.sql",
+  "migrations/009_deposit_worker_health.sql",
+  "migrations/010_trade_settlement_inventory.sql",
+  "migrations/011_trade_accounting.sql",
+  "migrations/012_asset_valuation_evidence.sql",
 ];
 
 async function main() {
