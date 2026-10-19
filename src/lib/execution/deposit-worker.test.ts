@@ -4,6 +4,7 @@ import {
   assertDepositWorkerActivation,
   assertRpcProviderAgreement,
   parseDepositWorkerSettings,
+  shouldNotifyDepositAlert,
 } from "./deposit-worker";
 import type { DepositRangeReader } from "./deposit-scanner";
 
@@ -77,6 +78,39 @@ function fakeReader(input: { chainId?: number; head: bigint; hash?: Hash }): Dep
     getTransaction: async () => { throw new Error("unused"); },
   } as unknown as DepositRangeReader;
 }
+
+describe("deposit worker alert throttling", () => {
+  const now = Date.parse("2026-10-19T12:00:00.000Z");
+
+  it("notifies immediately when an existing warning escalates to critical", () => {
+    expect(shouldNotifyDepositAlert({
+      resolvedAt: null,
+      lastNotifiedAt: new Date(now - 1_000),
+      severity: "warning",
+    }, "critical", now)).toBe(true);
+  });
+
+  it("throttles repeated alerts of the same severity", () => {
+    expect(shouldNotifyDepositAlert({
+      resolvedAt: null,
+      lastNotifiedAt: new Date(now - 60_000),
+      severity: "critical",
+    }, "critical", now)).toBe(false);
+  });
+
+  it("notifies again after the throttle interval or when an alert is resolved", () => {
+    expect(shouldNotifyDepositAlert({
+      resolvedAt: null,
+      lastNotifiedAt: new Date(now - 15 * 60_000),
+      severity: "warning",
+    }, "warning", now)).toBe(true);
+    expect(shouldNotifyDepositAlert({
+      resolvedAt: new Date(now - 1_000),
+      lastNotifiedAt: new Date(now - 1_000),
+      severity: "warning",
+    }, "warning", now)).toBe(true);
+  });
+});
 
 describe("deposit worker RPC agreement", () => {
   it("checks the same finalized block against both RPC providers", async () => {
