@@ -82,7 +82,7 @@ export async function verifyChainlinkAssetValuation(
   fallback:ValuationReader,
   request:AssetValuationRequest,
 ):Promise<VerifiedAssetValuation>{
-  if(!request.accountId.trim()||![request.assetAddress,request.quoteAssetAddress,request.assetFeedAddress,request.quoteFeedAddress].every(isAddress))
+  if(!request.accountId.trim()||![request.assetAddress,request.quoteAssetAddress,request.assetFeedAddress,request.quoteFeedAddress].every((address) => isAddress(address)))
     throw new Error("Asset valuation identity or feed addresses are invalid.");
   if(getAddress(request.assetAddress)===getAddress(request.quoteAssetAddress))throw new Error("Quote-token self-valuations are exact and do not require an oracle.");
   if(!Number.isInteger(request.tokenDecimals)||request.tokenDecimals<0||request.tokenDecimals>36||
