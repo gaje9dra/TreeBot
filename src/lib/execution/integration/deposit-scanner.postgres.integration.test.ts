@@ -61,7 +61,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await pool.query("DELETE FROM execution_portfolio_reconciliation WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1)", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_position_inventory WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
     await pool.query("DELETE FROM execution_open_positions WHERE account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
-    await pool.query("DELETE FROM execution_ledger_entries WHERE event_key LIKE $1 OR transaction_hash IN (SELECT tx_hash FROM execution_transactions WHERE id LIKE $1) OR account_id IN (SELECT wallet_address FROM execution_transactions WHERE id LIKE $1) OR account_id=$2", [`${prefix}%`,integrationWallet]);
+    // Keep journal rows: execution_ledger_entries is append-only by design. This suite uses unique prefixes and a disposable CI database.
     await pool.query("DELETE FROM execution_transactions WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_authorizations WHERE id LIKE $1", [`${prefix}%`]);
     await pool.query("DELETE FROM execution_deposit_lifecycle WHERE watcher_key LIKE $1", [`${prefix}%`]);
