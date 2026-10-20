@@ -134,7 +134,7 @@ export async function verifyTradeSettlement(
       request.sellToken,
       request.buyToken,
       request.transactionTarget,
-    ].every(isAddress)
+    ].every((address) => isAddress(address))
   ) {
     throw new Error("Trade settlement addresses are invalid.");
   }
@@ -220,7 +220,7 @@ export async function verifyTradeSettlement(
         abi: transferAbi,
         eventName: "Transfer",
         data: log.data,
-        topics: log.topics,
+        topics: [...log.topics] as [Hex, ...Hex[]],
       });
       decoded = { args: result.args as { from: Address; to: Address; value: bigint } };
     } catch {
