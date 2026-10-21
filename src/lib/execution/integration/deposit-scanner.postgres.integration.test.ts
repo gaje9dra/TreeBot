@@ -416,6 +416,8 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     })).resolves.toEqual({ reserved: true });
     await executionStore.beginWithdrawalSubmission(unknownId);
     await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "RPC timed out after submission may have started" });
+    // Simulate a worker restart/retry after the same ambiguous outcome was persisted.
+    await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "worker restarted before provider reconciliation completed" });
     const unknown = await pool.query("SELECT status FROM execution_withdrawal_reservations WHERE id=$1", [unknownId]);
     expect(unknown.rows[0].status).toBe("unknown");
     const incidentKey = "withdrawal-submission-unknown:137:" + unknownId;
@@ -427,6 +429,16 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       incident_type:"settlement_conflict",status:"open",account_id:accountId,asset_address:token,
       amount_base_units:"200",retry_allowed:"false",
     }]);
+    const incidentCount = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM execution_financial_incidents WHERE incident_key=$1",
+      [incidentKey],
+    );
+    expect(incidentCount.rows[0].count).toBe(1);
+    const unknownAuditCount = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM execution_withdrawal_audit_events WHERE withdrawal_id=$1 AND to_status='unknown'",
+      [unknownId],
+    );
+    expect(unknownAuditCount.rows[0].count).toBe(1);
     const restrictions = await pool.query(
       "SELECT account_id,restriction_type,status FROM execution_account_restrictions WHERE restriction_key IN ($1,$2) ORDER BY restriction_key",
       [incidentKey+":account",incidentKey+":source-wallet"],
