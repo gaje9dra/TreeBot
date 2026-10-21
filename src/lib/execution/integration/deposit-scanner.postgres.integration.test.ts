@@ -418,6 +418,27 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "RPC timed out after submission may have started" });
     const unknown = await pool.query("SELECT status FROM execution_withdrawal_reservations WHERE id=$1", [unknownId]);
     expect(unknown.rows[0].status).toBe("unknown");
+    const incidentKey = "withdrawal-submission-unknown:137:" + unknownId;
+    const incident = await pool.query(
+      "SELECT incident_type,status,account_id,asset_address,amount_base_units::text,details->>'retryAllowed' AS retry_allowed FROM execution_financial_incidents WHERE incident_key=$1",
+      [incidentKey],
+    );
+    expect(incident.rows).toEqual([{
+      incident_type:"settlement_conflict",status:"open",account_id:accountId,asset_address:token,
+      amount_base_units:"200",retry_allowed:"false",
+    }]);
+    const restrictions = await pool.query(
+      "SELECT account_id,restriction_type,status FROM execution_account_restrictions WHERE restriction_key IN ($1,$2) ORDER BY restriction_key",
+      [incidentKey+":account",incidentKey+":source-wallet"],
+    );
+    expect(restrictions.rows).toHaveLength(2);
+    expect(restrictions.rows.every((row) => row.restriction_type === "security_incident" && row.status === "active")).toBe(true);
+    await expect(executionStore.reserveWithdrawal({
+      id: prefix + "-withdrawal-blocked-after-unknown", accountId, sourceAddress: source, token, recipient, amount:"1",
+      idempotencyKey: prefix + "-withdrawal-blocked-after-unknown-key",
+    })).rejects.toThrow(/emergency stop/);
+    const stop = await pool.query("SELECT emergency_stop FROM execution_control WHERE id=1");
+    expect(stop.rows[0].emergency_stop).toBe(true);
     await expect(executionStore.cancelWithdrawalBeforeSubmission({
       id: unknownId, actorId: "integration-operator", reason: "attempted unsafe cancellation",
     })).rejects.toThrow(/may have been submitted/);
