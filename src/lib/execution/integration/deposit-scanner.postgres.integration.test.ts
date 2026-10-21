@@ -416,8 +416,41 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     })).resolves.toEqual({ reserved: true });
     await executionStore.beginWithdrawalSubmission(unknownId);
     await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "RPC timed out after submission may have started" });
+    // Simulate a worker restart/retry after the same ambiguous outcome was persisted.
+    await executionStore.recordWithdrawalUnknown({ id: unknownId, reason: "worker restarted before provider reconciliation completed" });
     const unknown = await pool.query("SELECT status FROM execution_withdrawal_reservations WHERE id=$1", [unknownId]);
     expect(unknown.rows[0].status).toBe("unknown");
+    const incidentKey = "withdrawal-submission-unknown:137:" + unknownId;
+    const incident = await pool.query(
+      "SELECT incident_type,status,account_id,asset_address,amount_base_units::text,details->>'retryAllowed' AS retry_allowed FROM execution_financial_incidents WHERE incident_key=$1",
+      [incidentKey],
+    );
+    expect(incident.rows).toEqual([{
+      incident_type:"settlement_conflict",status:"open",account_id:accountId,asset_address:token,
+      amount_base_units:"200",retry_allowed:"false",
+    }]);
+    const incidentCount = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM execution_financial_incidents WHERE incident_key=$1",
+      [incidentKey],
+    );
+    expect(incidentCount.rows[0].count).toBe(1);
+    const unknownAuditCount = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM execution_withdrawal_audit_events WHERE withdrawal_id=$1 AND to_status='unknown'",
+      [unknownId],
+    );
+    expect(unknownAuditCount.rows[0].count).toBe(1);
+    const restrictions = await pool.query(
+      "SELECT account_id,restriction_type,status FROM execution_account_restrictions WHERE restriction_key IN ($1,$2) ORDER BY restriction_key",
+      [incidentKey+":account",incidentKey+":source-wallet"],
+    );
+    expect(restrictions.rows).toHaveLength(2);
+    expect(restrictions.rows.every((row) => row.restriction_type === "security_incident" && row.status === "active")).toBe(true);
+    await expect(executionStore.reserveWithdrawal({
+      id: prefix + "-withdrawal-blocked-after-unknown", accountId, sourceAddress: source, token, recipient, amount:"1",
+      idempotencyKey: prefix + "-withdrawal-blocked-after-unknown-key",
+    })).rejects.toThrow(/emergency stop/);
+    const stop = await pool.query("SELECT emergency_stop FROM execution_control WHERE id=1");
+    expect(stop.rows[0].emergency_stop).toBe(true);
     await expect(executionStore.cancelWithdrawalBeforeSubmission({
       id: unknownId, actorId: "integration-operator", reason: "attempted unsafe cancellation",
     })).rejects.toThrow(/may have been submitted/);
@@ -438,6 +471,9 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       [accountId, successHash, revertedHash],
     );
     expect(gasEntries.rows.map((row) => row.amount_base_units)).toEqual(["-3000000", "-1600000"]);
+    // Remove only this test's durable incident fixtures; the CI PostgreSQL database is disposable.
+    await pool.query("DELETE FROM execution_account_restrictions WHERE restriction_key IN ($1,$2)", [incidentKey + ":account", incidentKey + ":source-wallet"]);
+    await pool.query("DELETE FROM execution_financial_incidents WHERE incident_key=$1", [incidentKey]);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 

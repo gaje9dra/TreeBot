@@ -7,6 +7,7 @@ import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
 import { isIssuedWithdrawalSettlement, type VerifiedWithdrawalSettlement } from "./withdrawal-verifier";
 import { isIssuedVerifiedTradeSettlement, type VerifiedTradeSettlement } from "./trade-settlement-verifier";
 import { isIssuedVerifiedAssetValuation, type VerifiedAssetValuation } from "./valuation-verifier";
+import { buildWithdrawalUnknownIncident } from "./withdrawal-incidents";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
@@ -561,13 +562,60 @@ export class PostgresExecutionStore {
     const c=await this.pool.connect();
     try{
       await c.query("BEGIN");
-      const q=await c.query("SELECT status,transaction_hash,nonce FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",[input.id]);
+      const q=await c.query(
+        "SELECT status,transaction_hash,nonce,account_id,source_address,asset_address,amount_base_units::text AS amount FROM execution_withdrawal_reservations WHERE id=$1 FOR UPDATE",
+        [input.id],
+      );
       const row=q.rows[0];if(!row)throw new Error("Withdrawal reservation not found.");
       if(!["submitting","submitted","unknown"].includes(String(row.status)))throw new Error("Only a possibly broadcast withdrawal can enter UNKNOWN.");
-      await c.query("UPDATE execution_withdrawal_reservations SET status='unknown',failure_reason=$2,updated_at=NOW() WHERE id=$1",[input.id,input.reason.slice(0,500)]);
-      const txHash=row.transaction_hash?String(row.transaction_hash).toLowerCase():"unresolved";
+      const incident = buildWithdrawalUnknownIncident({
+        accountId:String(row.account_id),
+        assetAddress:String(row.asset_address),
+        amountBaseUnits:String(row.amount),
+        withdrawalId:input.id,
+        transactionHash:row.transaction_hash ? String(row.transaction_hash) : null,
+        nonce:row.nonce === null || row.nonce === undefined ? null : Number(row.nonce),
+        reason:input.reason,
+      });
+      const evidence = JSON.stringify({
+        withdrawalId:input.id,
+        sourceAddress:row.source_address ? String(row.source_address).toLowerCase() : null,
+        assetAddress:incident.assetAddress,
+        amountBaseUnits:incident.amountBaseUnits,
+        transactionHash:incident.transactionHash,
+        nonce:incident.nonce,
+        reason:incident.reason,
+        retryAllowed:false,
+        reservationRetained:true,
+        requiresOperatorReconciliation:true,
+      });
+      await c.query("UPDATE execution_withdrawal_reservations SET status='unknown',failure_reason=$2,updated_at=NOW() WHERE id=$1",
+        [input.id,incident.reason]);
+      const txHash=incident.transactionHash ?? "unresolved";
       await c.query("INSERT INTO execution_withdrawal_audit_events(withdrawal_id,from_status,to_status,event_key,transaction_hash,nonce,details) VALUES($1,$2,'unknown',$3,$4,$5,$6::jsonb) ON CONFLICT(event_key) DO NOTHING",
-        [input.id,String(row.status),"withdrawal:"+input.id+":unknown:"+txHash,row.transaction_hash,row.nonce,JSON.stringify({reason:input.reason.slice(0,500),retryAllowed:false,reservationRetained:true})]);
+        [input.id,String(row.status),"withdrawal:"+input.id+":unknown:"+txHash,row.transaction_hash,row.nonce,evidence]);
+      await c.query(
+        `INSERT INTO execution_financial_incidents
+          (incident_key,incident_type,account_id,asset_address,amount_base_units,chain_id,transaction_hash,log_index,status,details)
+         VALUES($1,'settlement_conflict',$2,$3,$4,137,$5,NULL,'open',$6::jsonb)
+         ON CONFLICT(incident_key) DO UPDATE SET details=execution_financial_incidents.details || EXCLUDED.details`,
+        [incident.incidentKey,incident.accountId,incident.assetAddress,incident.amountBaseUnits,incident.transactionHash,evidence],
+      );
+      await c.query(
+        `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+         VALUES($1,$2,'security_incident','active','Withdrawal submission outcome is unknown; operator reconciliation is required.',$3::jsonb)
+         ON CONFLICT(restriction_key) DO UPDATE SET status='active',reason=EXCLUDED.reason,evidence=execution_account_restrictions.evidence || EXCLUDED.evidence,resolved_at=NULL,resolved_by=NULL`,
+        [incident.accountId,incident.incidentKey+":account",evidence],
+      );
+      if (row.source_address) {
+        await c.query(
+          `INSERT INTO execution_account_restrictions(account_id,restriction_key,restriction_type,status,reason,evidence)
+           VALUES(LOWER($1),$2,'security_incident','active','Withdrawal submission outcome is unknown; source wallet is restricted pending reconciliation.',$3::jsonb)
+           ON CONFLICT(restriction_key) DO UPDATE SET status='active',reason=EXCLUDED.reason,evidence=execution_account_restrictions.evidence || EXCLUDED.evidence,resolved_at=NULL,resolved_by=NULL`,
+          [String(row.source_address),incident.incidentKey+":source-wallet",evidence],
+        );
+      }
+      await c.query("UPDATE execution_control SET emergency_stop=TRUE,mismatch_detected_at=NOW(),updated_at=NOW() WHERE id=1");
       await c.query("COMMIT");
     }catch(e){await c.query("ROLLBACK").catch(()=>undefined);throw e;}finally{c.release();}
   }
