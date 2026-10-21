@@ -459,11 +459,7 @@ describePostgres("PostgresDepositScannerStore integration", () => {
       [accountId, successHash, revertedHash],
     );
     expect(gasEntries.rows.map((row) => row.amount_base_units)).toEqual(["-3000000", "-1600000"]);
-    // This integration test's ambiguous-withdrawal assertions intentionally create an
-    // operator incident. Remove only its unique test fixtures and reset the disposable DB.
-    await pool.query("DELETE FROM execution_account_restrictions WHERE restriction_key IN ($1,$2)",[incidentKey+":account",incidentKey+":source-wallet"]);
-    await pool.query("DELETE FROM execution_financial_incidents WHERE incident_key=$1",[incidentKey]);
-    // Isolate this test's incident fixtures; the CI PostgreSQL database is disposable.
+    // Remove only this test's durable incident fixtures; the CI PostgreSQL database is disposable.
     await pool.query("DELETE FROM execution_account_restrictions WHERE restriction_key IN ($1,$2)", [incidentKey + ":account", incidentKey + ":source-wallet"]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE incident_key=$1", [incidentKey]);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
