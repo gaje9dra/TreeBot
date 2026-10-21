@@ -7,6 +7,7 @@ import { isIssuedVerifiedDepositProof } from "./deposit-scanner";
 import { isIssuedWithdrawalSettlement, type VerifiedWithdrawalSettlement } from "./withdrawal-verifier";
 import { isIssuedVerifiedTradeSettlement, type VerifiedTradeSettlement } from "./trade-settlement-verifier";
 import { isIssuedVerifiedAssetValuation, type VerifiedAssetValuation } from "./valuation-verifier";
+import { buildWithdrawalUnknownIncident } from "./withdrawal-incidents";
 
 export interface ExecutionIntentInput {
   id:string; idempotencyKey:string; walletAddress:string; sellToken:string; buyToken:string; sellAmount:string;
