@@ -463,6 +463,9 @@ describePostgres("PostgresDepositScannerStore integration", () => {
     // operator incident. Remove only its unique test fixtures and reset the disposable DB.
     await pool.query("DELETE FROM execution_account_restrictions WHERE restriction_key IN ($1,$2)",[incidentKey+":account",incidentKey+":source-wallet"]);
     await pool.query("DELETE FROM execution_financial_incidents WHERE incident_key=$1",[incidentKey]);
+    // Isolate this test's incident fixtures; the CI PostgreSQL database is disposable.
+    await pool.query("DELETE FROM execution_account_restrictions WHERE restriction_key IN ($1,$2)", [incidentKey + ":account", incidentKey + ":source-wallet"]);
+    await pool.query("DELETE FROM execution_financial_incidents WHERE incident_key=$1", [incidentKey]);
     await pool.query("UPDATE execution_control SET emergency_stop=TRUE WHERE id=1");
   });
 
