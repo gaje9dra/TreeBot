@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const LIVE_EXECUTION_AVAILABLE = false;
+export const DEPOSIT_FEATURE_AVAILABLE = false;
+
 const configSchema = z.object({
   chainId: z.coerce.number().int().refine((n) => n === 137, "Only Polygon PoS chain ID 137 is supported."),
   tradingMode: z.enum(["paper", "live"]).default("paper"),
@@ -21,6 +24,12 @@ const configSchema = z.object({
 }).superRefine((value, ctx) => {
   if (value.tradingMode === "live" && !value.liveTradingEnabled) {
     ctx.addIssue({ code: "custom", path: ["liveTradingEnabled"], message: "Live mode requires an explicit live-trading enable flag." });
+  }
+  // An environment flag is not an implementation or release approval. Until a
+  // reviewed live adapter exists, fail closed even if an operator sets both
+  // live-mode variables intentionally.
+  if ((value.tradingMode === "live" || value.liveTradingEnabled) && !LIVE_EXECUTION_AVAILABLE) {
+    ctx.addIssue({ code: "custom", path: ["tradingMode"], message: "Live execution is unavailable in this build; use paper mode until the execution adapter and release gates are implemented and reviewed." });
   }
   if (value.liveTradingEnabled && !/^0x[0-9a-fA-F]{40}$/.test(value.accountingQuoteToken)) {
     ctx.addIssue({ code: "custom", path: ["accountingQuoteToken"], message: "Live trading requires a configured canonical accounting quote token." });
@@ -61,6 +70,3 @@ export function loadConfig(env: ConfigEnvironment = process.env): TreeBotConfig 
   if (!parsed.success) throw new Error(`Invalid TreeBot configuration: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   return parsed.data;
 }
-
-export const LIVE_EXECUTION_AVAILABLE = false;
-export const DEPOSIT_FEATURE_AVAILABLE = false;

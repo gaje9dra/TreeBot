@@ -13,6 +13,19 @@ describe("configuration safety", () => {
     expect(() => loadConfig({ NEXT_PUBLIC_CHAIN_ID: "1" })).toThrow();
     expect(() => loadConfig({ TREEBOT_TRADING_MODE: "live" })).toThrow();
   });
+  it("rejects live mode even when the environment flag and accounting token are supplied", () => {
+    expect(() => loadConfig({
+      TREEBOT_TRADING_MODE: "live",
+      TREEBOT_LIVE_TRADING_ENABLED: "true",
+      TREEBOT_ACCOUNTING_QUOTE_TOKEN: "0x0000000000000000000000000000000000000020",
+    })).toThrow(/Live execution is unavailable in this build/);
+  });
+  it("rejects a live enable flag even when trading mode is left as paper", () => {
+    expect(() => loadConfig({
+      TREEBOT_LIVE_TRADING_ENABLED: "true",
+      TREEBOT_ACCOUNTING_QUOTE_TOKEN: "0x0000000000000000000000000000000000000020",
+    })).toThrow(/Live execution is unavailable in this build/);
+  });
   it("keeps deposits hard-disabled until the release gate and operator prerequisites are approved", () => {
     expect(() => loadConfig({ TREEBOT_DEPOSITS_ENABLED: "true" })).toThrow(/Deposits are disabled/);
     expect(() => loadConfig({
