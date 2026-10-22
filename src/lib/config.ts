@@ -22,6 +22,12 @@ const configSchema = z.object({
   if (value.tradingMode === "live" && !value.liveTradingEnabled) {
     ctx.addIssue({ code: "custom", path: ["liveTradingEnabled"], message: "Live mode requires an explicit live-trading enable flag." });
   }
+  // An environment flag is not an implementation or release approval. Until a
+  // reviewed live adapter exists, fail closed even if an operator sets both
+  // live-mode variables intentionally.
+  if ((value.tradingMode === "live" || value.liveTradingEnabled) && !LIVE_EXECUTION_AVAILABLE) {
+    ctx.addIssue({ code: "custom", path: ["tradingMode"], message: "Live execution is unavailable in this build; use paper mode until the execution adapter and release gates are implemented and reviewed." });
+  }
   if (value.liveTradingEnabled && !/^0x[0-9a-fA-F]{40}$/.test(value.accountingQuoteToken)) {
     ctx.addIssue({ code: "custom", path: ["accountingQuoteToken"], message: "Live trading requires a configured canonical accounting quote token." });
   }
