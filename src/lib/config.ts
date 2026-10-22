@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const LIVE_EXECUTION_AVAILABLE = false;
+export const DEPOSIT_FEATURE_AVAILABLE = false;
+
 const configSchema = z.object({
   chainId: z.coerce.number().int().refine((n) => n === 137, "Only Polygon PoS chain ID 137 is supported."),
   tradingMode: z.enum(["paper", "live"]).default("paper"),
@@ -67,6 +70,3 @@ export function loadConfig(env: ConfigEnvironment = process.env): TreeBotConfig 
   if (!parsed.success) throw new Error(`Invalid TreeBot configuration: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   return parsed.data;
 }
-
-export const LIVE_EXECUTION_AVAILABLE = false;
-export const DEPOSIT_FEATURE_AVAILABLE = false;
