@@ -119,6 +119,6 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
     netExpectancyQuote: pnl.length ? pnl.reduce((a,b)=>a+b,0) / pnl.length : 0,
     feesQuote: fees, slippageQuote: slippage, gasQuote: gas, finalEquityQuote: equity,
     benchmarkReturnPercent: (lastPrice / firstPrice - 1) * 100,
-    notes: ["SIMULATED historical replay only; not actual earnings.", "Uses next-bar open for entries/exits to reduce look-ahead bias.", "Liquidity, failed fills, and historical gas conditions remain simplified; validate out of sample."]
+    notes: ["SIMULATED historical replay only; not actual earnings.", "Uses next-bar open for entries/exits to reduce look-ahead bias.", "Slippage is reflected in adverse entry/exit fills and must not be deducted twice.", "Liquidity, failed fills, and historical gas conditions remain simplified; validate out of sample."]
   };
 }
