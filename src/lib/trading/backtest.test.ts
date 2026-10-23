@@ -17,6 +17,7 @@ describe("historical backtest", () => {
     expect(report.slippageQuote).toBeGreaterThanOrEqual(0);
     expect(report.gasQuote).toBeGreaterThanOrEqual(0);
     expect(report.notes.some((n) => n.includes("not actual earnings"))).toBe(true);
+    expect(report.notes.some((n) => n.includes("must not be deducted twice"))).toBe(true);
   });
   it("rejects too little history and invalid costs", () => {
     expect(() => backtest(candles.slice(0, 10), { startingEquityQuote: 100, notionalQuote: 10, feeBps: 1, slippageBps: 1, gasQuotePerTrade: 0 })).toThrow();

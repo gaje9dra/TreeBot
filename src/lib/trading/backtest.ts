@@ -68,36 +68,52 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
       now: current.timestamp
     });
     // Execute at next bar open with explicit one-way slippage on each side.
+    let openedAtNextBar = false;
     if (!position && decision.accepted && decision.action === "buy") {
       const notional = Math.min(options.notionalQuote, equity);
       if (notional <= 0) continue;
       const fee = notional * options.feeBps / 10_000;
       const slip = notional * options.slippageBps / 10_000;
       fees += fee; slippage += slip; gas += options.gasQuotePerTrade;
-      equity -= fee + slip + options.gasQuotePerTrade;
+      // Slippage is already reflected in the adverse entry fill price; do not deduct it from equity a second time.
+      equity -= fee + options.gasQuotePerTrade;
       position = { entry: next.open * (1 + options.slippageBps / 10_000), notional };
+      openedAtNextBar = true;
     } else if (position && (decision.action === "sell" || current.close <= position.entry * 0.97 || current.close >= position.entry * 1.05 || i === candles.length - 2)) {
       const exit = next.open * (1 - options.slippageBps / 10_000);
-      const gross = (exit / position.entry - 1) * position.notional;
-      const fee = position.notional * options.feeBps / 10_000;
-      const slip = position.notional * options.slippageBps / 10_000;
-      const net = gross - fee - slip - options.gasQuotePerTrade;
-      equity += gross - fee - slip - options.gasQuotePerTrade;
+      const exitNotional = position.notional * (exit / position.entry);
+      const gross = exitNotional - position.notional;
+      const fee = exitNotional * options.feeBps / 10_000;
+      const slip = position.notional * (next.open / position.entry) * options.slippageBps / 10_000;
+      // Slippage is reflected in the adverse exit fill price; report it, but do not deduct it twice.
+      const net = gross - fee - options.gasQuotePerTrade;
+      equity += net;
       pnl.push(net); fees += fee; slippage += slip; gas += options.gasQuotePerTrade;
       position = null;
     }
-    peak = Math.max(peak, equity);
-    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak * 100);
+    // Mark open positions to market so drawdown includes unrealized losses.
+    const markedEquity = position && !openedAtNextBar
+      ? equity + (current.close / position.entry - 1) * position.notional
+      : equity;
+    peak = Math.max(peak, markedEquity);
+    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - markedEquity) / peak * 100);
   }
   if (position) {
     const last = candles.at(-1)!;
-    const gross = (last.close / position.entry - 1) * position.notional;
-    const net = gross - position.notional * options.feeBps / 10_000 - position.notional * options.slippageBps / 10_000 - options.gasQuotePerTrade;
+    const exitPrice = last.close * (1 - options.slippageBps / 10_000);
+    const exitNotional = position.notional * (exitPrice / position.entry);
+    const gross = exitNotional - position.notional;
+    const exitFee = exitNotional * options.feeBps / 10_000;
+    const exitSlippage = position.notional * (last.close / position.entry) * options.slippageBps / 10_000;
+    // The adverse final exit fill already includes slippage; do not deduct it twice.
+    const net = gross - exitFee - options.gasQuotePerTrade;
     equity += net;
     pnl.push(net);
-    fees += position.notional * options.feeBps / 10_000;
-    slippage += position.notional * options.slippageBps / 10_000;
+    fees += exitFee;
+    slippage += exitSlippage;
     gas += options.gasQuotePerTrade;
+    peak = Math.max(peak, equity);
+    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak * 100);
   }
   const wins = pnl.filter(v => v > 0), losses = pnl.filter(v => v < 0);
   const totalWins = wins.reduce((a,b) => a+b, 0);
@@ -112,6 +128,6 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
     netExpectancyQuote: pnl.length ? pnl.reduce((a,b)=>a+b,0) / pnl.length : 0,
     feesQuote: fees, slippageQuote: slippage, gasQuote: gas, finalEquityQuote: equity,
     benchmarkReturnPercent: (lastPrice / firstPrice - 1) * 100,
-    notes: ["SIMULATED historical replay only; not actual earnings.", "Uses next-bar open for entries/exits to reduce look-ahead bias.", "Liquidity, failed fills, and historical gas conditions remain simplified; validate out of sample."]
+    notes: ["SIMULATED historical replay only; not actual earnings.", "Uses next-bar open for entries/exits to reduce look-ahead bias.", "Slippage is reflected in adverse entry/exit fills and must not be deducted twice.", "Liquidity, failed fills, and historical gas conditions remain simplified; validate out of sample."]
   };
 }

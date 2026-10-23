@@ -34,7 +34,7 @@ export interface PortfolioState {
   reservedQuote: number;
   dailyStartEquityQuote: number;
   peakEquityQuote: number;
-  openPositions: Array<{ pair: string; notionalQuote: number; direction: "long" | "short" }>;
+  openPositions: Array<{ pair: string; notionalQuote: number; direction: "long" | "short"; entryPrice?: number }>;
   consecutiveLosses: number;
   tradesLastHour: number;
   gasSpentQuote: number;

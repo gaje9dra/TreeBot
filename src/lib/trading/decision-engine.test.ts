@@ -73,6 +73,24 @@ describe("explainable decision engine", () => {
     expect(decision.reasons).toEqual([]);
   });
 
+  it("closes paper positions at the stop-loss and take-profit thresholds", () => {
+    for (const price of [96, 105]) {
+      const decision = evaluateOpportunity({
+        market: { ...market, price },
+        portfolio: {
+          ...portfolio,
+          availableQuote: 0,
+          openPositions: [{ pair: market.pair, notionalQuote: 100, direction: "long", entryPrice: 100 }],
+        },
+        availableCapitalPol: 0,
+        now,
+      });
+      expect(decision.action).toBe("sell");
+      expect(decision.accepted).toBe(true);
+      expect(decision.reasons).toEqual([]);
+    }
+  });
+
   it("rejects unavailable exit liquidity", () => {
     const decision = evaluateOpportunity({ market: { ...market, executableExit: false }, portfolio, availableCapitalPol: 200, now });
     expect(decision.accepted).toBe(false);
