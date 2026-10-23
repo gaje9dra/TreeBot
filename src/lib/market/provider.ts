@@ -75,13 +75,6 @@ function numberValue(value: unknown): number | undefined {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : undefined;
 }
-function relationshipAddress(value: unknown): string | undefined {
-  const data = record(record(value)?.data);
-  const id = data?.id;
-  if (typeof id !== "string") return undefined;
-  const separator = id.lastIndexOf("_");
-  return separator >= 0 ? id.slice(separator + 1) : undefined;
-}
 function tokenSymbol(included: unknown, tokenId: string | undefined): string | undefined {
   if (!Array.isArray(included) || !tokenId) return undefined;
   for (const entry of included) {
