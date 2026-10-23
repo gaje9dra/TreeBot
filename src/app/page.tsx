@@ -70,6 +70,7 @@ export default function HomePage() {
   const [backtestReport, setBacktestReport] = useState<BacktestReport>();
   const [paperDashboard, setPaperDashboard] = useState<PaperDashboardPayload>();
   const [paperDashboardError, setPaperDashboardError] = useState<string>();
+  const [liveModeNotice, setLiveModeNotice] = useState(false);
 
   const chain = useMemo(() => validateConnectedChain(chainId), [chainId]);
   const capital = useMemo(() => balanceWei === undefined ? null : assessNativeCapital(balanceWei), [balanceWei]);
@@ -265,7 +266,14 @@ export default function HomePage() {
       <header className="topbar">
         <div className="brand"><div className="brand-mark">T</div><div>TREEBOT<div className="eyebrow" style={{ marginTop: 3 }}>POLYGON TRADING SYSTEM</div></div></div>
         <div className="actions">
-          <span className="pill"><span className="dot" /> PAPER MODE · LIVE DISABLED</span>
+          <div className="mode-switch" role="group" aria-label="Trading mode">
+            <button type="button" className="mode-option active" aria-pressed="true" onClick={() => setLiveModeNotice(false)}>
+              <span className="mode-indicator" /> Paper Mode
+            </button>
+            <button type="button" className="mode-option locked" aria-pressed="false" aria-describedby="live-mode-status" onClick={() => setLiveModeNotice(true)}>
+              <ShieldCheck size={13} aria-hidden="true" /> Real Funds <span className="mode-lock">LOCKED</span>
+            </button>
+          </div>
           {address
             ? <button className="btn" onClick={() => void disconnectWallet()}><Wallet size={14} style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />{address.slice(0, 6)}…{address.slice(-4)}</button>
             : <button className="btn btn-primary" disabled={connecting || !walletProviderAvailable} onClick={() => void connectWallet()}>{connecting ? "Connecting…" : "Connect wallet"}</button>}
@@ -280,6 +288,10 @@ export default function HomePage() {
         </div>
       </section>
 
+      {liveModeNotice && <div id="live-mode-status" className="callout mode-notice" role="status" style={{ marginBottom: 14 }}>
+        <strong>Real Funds mode is unavailable in this build.</strong> Live execution is hard-disabled server-side. No live orders, deposits, or withdrawals can be activated from this toggle. Keep using Paper Mode until the execution adapter, transaction reconciliation, accounting, security review, and release gates are complete.
+        <button type="button" className="btn" style={{ marginLeft: 12 }} onClick={() => setLiveModeNotice(false)}>Dismiss</button>
+      </div>}
       {walletError && <div className="callout" style={{ marginBottom: 14 }}>Wallet notice: {walletError}</div>}
 
       <div className="grid">
