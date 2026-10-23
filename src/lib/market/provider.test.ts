@@ -52,8 +52,13 @@ describe("configured market-data provider", () => {
     expect(String(call[0])).toContain("pair=WMATIC%2FUSDC");
   });
 
-  it("rejects missing configuration and insecure provider URLs", async () => {
-    await expect(loadMarketSnapshot("WMATIC/USDC", { env: {} })).rejects.toMatchObject({ code: "NOT_CONFIGURED" });
+  it("uses the native public provider when no custom provider is configured", async () => {
+    const { fetcher, mock } = fetchResponse({}, 429);
+    await expect(loadMarketSnapshot("WMATIC/USDC", { env: {}, fetcher })).rejects.toMatchObject({ code: "UPSTREAM" });
+    expect(String(mock.mock.calls[0][0])).toContain("api.geckoterminal.com/api/v2/search/pools");
+  });
+
+  it("rejects insecure custom provider URLs", async () => {
     await expect(loadMarketSnapshot("WMATIC/USDC", {
       env: { MARKET_DATA_BASE_URL: "http://market.example" },
       fetcher: fetchResponse(snapshot).fetcher,

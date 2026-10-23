@@ -23,7 +23,7 @@ Open `http://localhost:3000`. Wallet balance queries use the connected browser w
 | `NEXT_PUBLIC_CHAIN_ID` | Expected Polygon chain ID | `137`; configuration rejects other chains |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | WalletConnect project ID | Optional until connector is configured |
 | `POLYGON_RPC_URL` | Trusted server-side RPC URL | HTTPS required outside localhost |
-| `MARKET_DATA_BASE_URL` | Trusted provider base URL | Server requests `GET {base}/snapshot?pair=...`; response must match the normalized snapshot schema and include at least 22 ordered candles |
+| `MARKET_DATA_BASE_URL` | Optional trusted custom provider base URL | If unset, the built-in GeckoTerminal adapter searches Polygon PoS pools and loads hourly OHLCV candles. Custom responses must match the normalized schema and include at least 22 ordered candles |
 | `MARKET_DATA_API_KEY` | Provider secret | Sent as a server-side Bearer token; never use a `NEXT_PUBLIC_` prefix |
 | `DATABASE_URL` | PostgreSQL connection string | Required for durable paper-worker ledger; use TLS for remote databases and keep credentials secret |
 | `TREEBOT_MARKET_PAIRS` | Comma-separated normalized provider pair IDs | Example `WMATIC/USDC`; each pair requires the provider snapshot contract |
@@ -55,8 +55,8 @@ npm run format:check
 npm audit --audit-level=high
 ```
 
-Use Node.js 22 to match CI. On a fresh clone run `npm install`. To configure the durable paper worker, set `DATABASE_URL`, `MARKET_DATA_BASE_URL`, and `TREEBOT_MARKET_PAIRS`, then run `npm run ledger:migrate`. Start the worker with `npm run worker:paper`. It is paused by default; use `npm run paper:control -- enable` to enable paper cycles, `npm run paper:control -- disable` to pause new entries, `npm run paper:control -- emergency-stop` for the durable stop, and `npm run paper:control -- clear-stop` only to clear the stop (it does not enable trading). These controls affect paper simulation only.
+Use Node.js 22 to match CI. On a fresh clone run `npm install`. To configure the durable paper worker, set `DATABASE_URL` and `TREEBOT_MARKET_PAIRS` (plus `MARKET_DATA_BASE_URL` only if using a custom normalized provider), then run `npm run ledger:migrate`. Start the worker with `npm run worker:paper`. It is paused by default; use `npm run paper:control -- enable` to enable paper cycles, `npm run paper:control -- disable` to pause new entries, `npm run paper:control -- emergency-stop` for the durable stop, and `npm run paper:control -- clear-stop` only to clear the stop (it does not enable trading). These controls affect paper simulation only.
 
 ## Current limitations
 
-The health endpoint describes process/config health only; it does not prove RPC health or worker liveness. The dashboard polls the PostgreSQL paper ledger for worker controls, recent worker heartbeat, simulated equity, realized paper P&L, and recent simulated fills. A worker marked enabled without a recent heartbeat is shown as offline. Worker operation still requires an external PostgreSQL database, configured provider, and a separately supervised worker process. Historical replay and paper fills are simulation only. Real swaps, deposits, and withdrawals remain disabled.
+The health endpoint describes process/config health only; it does not prove RPC health or worker liveness. The dashboard polls the PostgreSQL paper ledger for worker controls, recent worker heartbeat, simulated equity, realized paper P&L, and recent simulated fills. A worker marked enabled without a recent heartbeat is shown as offline. Worker operation still requires an external PostgreSQL database, reachable market-data API, and a separately supervised worker process. The built-in GeckoTerminal adapter provides read-only market data only; it does not verify swap execution, and its public API may rate-limit requests. Historical replay and paper fills are simulation only. Real swaps, deposits, and withdrawals remain disabled.
