@@ -36,7 +36,7 @@ declare global {
 const initialFeed: FeedEvent[] = [
   { title: "TreeBot console initialized", detail: "Paper worker runs separately and is controlled through the CLI; PostgreSQL and market-provider configuration are required.", time: "SYSTEM", type: "info" },
   { title: "Risk gates loaded", detail: "150 POL minimum · 2 POL gas reserve · 5 POL maximum simulated order.", time: "SYSTEM", type: "info" },
-  { title: "Market data not configured", detail: "Add a trusted provider endpoint before evaluating live market opportunities.", time: "WAITING", type: "warn" }
+  { title: "Public market-data adapter ready", detail: "TreeBot uses GeckoTerminal read-only market data by default; pool liquidity and history must still validate.", time: "WAITING", type: "warn" }
 ];
 
 function getInjectedProvider(): Eip1193Provider | undefined {
@@ -350,7 +350,7 @@ export default function HomePage() {
             <Metric icon={<ShieldCheck size={14} />} label="HISTORY / EXIT" value={marketSnapshot.candles.length + " candles"} meta={marketSnapshot.executableExit ? "Provider reports exit route available; not independently executed" : "No executable exit route reported"} tone={marketSnapshot.executableExit ? "good" : "warn"} />
           </div>
           <p className="meta" style={{ marginTop: 12 }}>Snapshot timestamp: {new Date(marketSnapshot.observedAt).toLocaleString()} · Last fetched in this browser: {marketCheckedAt ? new Date(marketCheckedAt).toLocaleTimeString() : "—"}. Freshness is checked server-side; this view does not place orders.</p>
-        </> : <div className="empty">No provider data loaded. Configure MARKET_DATA_BASE_URL to a trusted HTTPS service implementing the normalized snapshot contract, then fetch a snapshot. No sample or fallback prices are shown.</div>}
+        </> : <div className="empty">No provider data loaded. TreeBot tries GeckoTerminal by default. If no matching liquid Polygon pool is found, verify the pair symbols or configure MARKET_DATA_BASE_URL for a trusted normalized snapshot service. No sample prices are used.</div>}
       </section>
 
       <div className="section-head"><h2>Historical backtest</h2><span className="eyebrow">SIMULATED · NOT EARNINGS</span></div>
