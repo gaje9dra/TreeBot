@@ -58,3 +58,14 @@ td{padding:13px 12px;border-bottom:1px solid #222a33;white-space:nowrap}
 .field{width:100%;min-height:40px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#0e1318;color:var(--text);outline:none}
 .field:focus{border-color:var(--mint);box-shadow:0 0 0 2px #82f5bf22}
 @media(max-width:560px){.market-controls{align-items:stretch;flex-direction:column}.field-label{min-width:0}.market-controls .btn{width:100%}}
+
+.mode-switch{display:inline-flex;align-items:center;gap:4px;padding:4px;border:1px solid var(--line);border-radius:12px;background:#0e1318}
+.mode-option{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:8px 11px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);font-size:11px;font-weight:800;white-space:nowrap;cursor:pointer;transition:background .18s,border-color .18s,color .18s}
+.mode-option.active{background:#11221b;border-color:#32664f;color:var(--mint)}
+.mode-option.locked{color:#aab3be}
+.mode-option.locked:hover{border-color:#6c5735;color:var(--amber)}
+.mode-indicator{width:7px;height:7px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 3px #82f5bf1a}
+.mode-lock{padding:3px 5px;border:1px solid #6c5735;border-radius:5px;color:var(--amber);font:9px "DM Mono",monospace;letter-spacing:.04em}
+.mode-notice{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mode-option:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+@media(max-width:560px){.mode-switch{width:100%}.mode-option{flex:1;padding:8px 7px}.topbar .actions{width:100%}}
