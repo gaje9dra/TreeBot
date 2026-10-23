@@ -69,6 +69,8 @@ export function evaluateOpportunity(input: EvaluateInput): TradeDecision {
   // These still pass the market-integrity and executable-exit gates above.
   if (positionReturn !== null && (positionReturn <= -0.03 || positionReturn >= 0.05)) {
     direction = "sell";
+    const filterReason = reasons.indexOf("Trend and momentum filters do not align; prefer no trade.");
+    if (filterReason >= 0) reasons.splice(filterReason, 1);
   }
 
   const pairExposure = portfolio.openPositions.filter((p) => p.pair === market.pair).reduce((s, p) => s + p.notionalQuote, 0);
