@@ -68,6 +68,7 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
       now: current.timestamp
     });
     // Execute at next bar open with explicit one-way slippage on each side.
+    let openedAtNextBar = false;
     if (!position && decision.accepted && decision.action === "buy") {
       const notional = Math.min(options.notionalQuote, equity);
       if (notional <= 0) continue;
@@ -77,6 +78,7 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
       // Slippage is already reflected in the adverse entry fill price; do not deduct it from equity a second time.
       equity -= fee + options.gasQuotePerTrade;
       position = { entry: next.open * (1 + options.slippageBps / 10_000), notional };
+      openedAtNextBar = true;
     } else if (position && (decision.action === "sell" || current.close <= position.entry * 0.97 || current.close >= position.entry * 1.05 || i === candles.length - 2)) {
       const exit = next.open * (1 - options.slippageBps / 10_000);
       const exitNotional = position.notional * (exit / position.entry);
@@ -89,22 +91,29 @@ export function backtest(candles: Candle[], options: BacktestOptions): BacktestR
       pnl.push(net); fees += fee; slippage += slip; gas += options.gasQuotePerTrade;
       position = null;
     }
-    peak = Math.max(peak, equity);
-    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak * 100);
+    // Mark open positions to market so drawdown includes unrealized losses.
+    const markedEquity = position && !openedAtNextBar
+      ? equity + (current.close / position.entry - 1) * position.notional
+      : equity;
+    peak = Math.max(peak, markedEquity);
+    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - markedEquity) / peak * 100);
   }
   if (position) {
     const last = candles.at(-1)!;
-    const exitNotional = position.notional * (last.close / position.entry);
+    const exitPrice = last.close * (1 - options.slippageBps / 10_000);
+    const exitNotional = position.notional * (exitPrice / position.entry);
     const gross = exitNotional - position.notional;
     const exitFee = exitNotional * options.feeBps / 10_000;
     const exitSlippage = position.notional * (last.close / position.entry) * options.slippageBps / 10_000;
-    // The final mark uses the observed close as its fill; slippage is modeled as a cost here once.
-    const net = gross - exitFee - exitSlippage - options.gasQuotePerTrade;
+    // The adverse final exit fill already includes slippage; do not deduct it twice.
+    const net = gross - exitFee - options.gasQuotePerTrade;
     equity += net;
     pnl.push(net);
     fees += exitFee;
     slippage += exitSlippage;
     gas += options.gasQuotePerTrade;
+    peak = Math.max(peak, equity);
+    if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak * 100);
   }
   const wins = pnl.filter(v => v > 0), losses = pnl.filter(v => v < 0);
   const totalWins = wins.reduce((a,b) => a+b, 0);
